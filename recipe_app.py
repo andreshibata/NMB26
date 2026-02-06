@@ -4,10 +4,9 @@ import firebase_admin
 from firebase_admin import credentials
 from firebase_admin import firestore
 import json
-from datetime import datetime
 
 # --- 1. CONFIGURAÇÃO ---
-st.set_page_config(page_title="Sistema de Produção & Estoque", layout="wide", page_icon="🏭")
+st.set_page_config(page_title="Gestor de Receitas & Sobras", layout="wide", page_icon="🥘")
 
 # --- 2. CONEXÃO SEGURA ---
 @st.cache_resource
@@ -22,277 +21,288 @@ def conectar_banco():
                 cred = credentials.Certificate(key_dict)
                 firebase_admin.initialize_app(cred)
             else:
-                st.error("Erro de conexão com banco de dados.")
+                st.error("❌ Erro de conexão.")
                 st.stop()
     return firestore.client()
 
 db = conectar_banco()
 
-# --- 3. FUNÇÕES DE BANCO DE DADOS ---
-
-def adicionar_estoque(nome, marca, mercado, preco, tamanho, unidade):
-    """Adiciona um item específico ao Armazém"""
-    # ID único combinando nome, marca e mercado para diferenciar versões
-    safe_id = f"{nome}_{marca}_{mercado}".replace(" ", "_").lower()
-    
-    db.collection("inventory").document(safe_id).set({
-        "nome": nome,
-        "marca": marca,
-        "mercado": mercado,
-        "preco_pago": preco,
-        "tamanho_orig": tamanho,
-        "estoque_atual": tamanho, # Começa cheio
-        "unidade": unidade,
-        "custo_por_unidade": preco / tamanho if tamanho > 0 else 0,
-        "data_compra": firestore.SERVER_TIMESTAMP
-    })
+# --- 3. FUNÇÕES ---
 
 def pegar_estoque():
-    """Pega tudo que está no armazém"""
+    """Pega tudo que sobrou de outras receitas"""
     docs = db.collection("inventory").stream()
+    # Retorna lista de dicionários
     return [doc.to_dict() for doc in docs]
 
-def salvar_receita(nome, autor, ingredientes):
+def salvar_receita_e_atualizar_sobras(nome, autor, ingredientes, salvar_sobras=True):
+    # 1. Cria ID único
     doc_id = f"{nome}_{autor}".replace(" ", "_").lower()
-    # A receita salva apenas o NOME genérico do ingrediente e a quantidade necessária
+    custo_total = sum(i['custo_final'] for i in ingredientes)
+    
+    # 2. Salva a Receita
     db.collection("recipes").document(doc_id).set({
         "name": nome,
         "author": autor,
         "ingredients": ingredientes,
+        "total_cost": custo_total,
         "created_at": firestore.SERVER_TIMESTAMP
     })
+    
+    # 3. Atualiza o Estoque com o que sobrou (SE solicitado)
+    if salvar_sobras:
+        for item in ingredientes:
+            # Sobra = O pacote que comprei MENOS o que usei
+            sobra = item['tam_pacote'] - item['qtd_usada']
+            
+            if sobra > 0:
+                # Cria um ID específico para essa marca/ingrediente
+                nome_marca = item.get('marca', 'Genérico')
+                estoque_id = f"{item['nome']}_{nome_marca}".replace(" ", "_").lower()
+                
+                # Verifica se já existe para somar (opcional) ou sobrescreve
+                # Aqui vamos somar se já existir esse mesmo item/marca
+                ref = db.collection("inventory").document(estoque_id)
+                doc = ref.get()
+                
+                if doc.exists:
+                    estoque_atual = doc.to_dict().get('estoque_atual', 0)
+                    nova_qtd = estoque_atual + sobra
+                else:
+                    nova_qtd = sobra
+                
+                ref.set({
+                    "nome": item['nome'],
+                    "marca": nome_marca,
+                    "mercado": item.get('mercado', ''),
+                    "estoque_atual": nova_qtd,
+                    "unidade": item['unidade'],
+                    "preco_pago": item['preco_compra'],
+                    "tam_orig": item['tam_pacote']
+                })
 
 def pegar_receitas():
     docs = db.collection("recipes").stream()
-    lista = []
-    for doc in docs:
-        d = doc.to_dict()
-        d['id'] = doc.id
-        lista.append(d)
-    return lista
+    return [doc.to_dict() for doc in docs]
 
-def realizar_baixa_estoque(plano_producao):
-    """
-    Abate do estoque os itens usados.
-    plano_producao = [{'nome_ingrediente': 'Farinha', 'qtd_necessaria': 1000}, ...]
-    """
-    log_msg = []
-    
-    estoque_atual = pegar_estoque()
-    
-    for item_nec in plano_producao:
-        nome_buscado = item_nec['nome']
-        qtd_restante_para_abater = item_nec['qtd_necessaria']
-        
-        # Procura no estoque itens com esse nome (Ex: Farinha Dona Benta, Farinha Sol)
-        # Ordena para usar primeiro o que tem menos estoque (FIFO) ou lógica preferida
-        lotes_compativeis = [i for i in estoque_atual if i['nome'] == nome_buscado and i['estoque_atual'] > 0]
-        
-        if not lotes_compativeis:
-            log_msg.append(f"❌ FALTA: {nome_buscado} (Não há estoque suficiente)")
-            continue
-            
-        for lote in lotes_compativeis:
-            if qtd_restante_para_abater <= 0:
-                break
-                
-            safe_id = f"{lote['nome']}_{lote['marca']}_{lote['mercado']}".replace(" ", "_").lower()
-            
-            # Se o lote tem mais do que precisamos
-            if lote['estoque_atual'] >= qtd_restante_para_abater:
-                novo_estoque = lote['estoque_atual'] - qtd_restante_para_abater
-                db.collection("inventory").document(safe_id).update({"estoque_atual": novo_estoque})
-                log_msg.append(f"✅ Usado {qtd_restante_para_abater}{lote['unidade']} de {lote['nome']} ({lote['marca']})")
-                qtd_restante_para_abater = 0
-            
-            # Se o lote acaba e ainda precisamos de mais
-            else:
-                usado = lote['estoque_atual']
-                db.collection("inventory").document(safe_id).update({"estoque_atual": 0})
-                qtd_restante_para_abater -= usado
-                log_msg.append(f"⚠️ Lote de {lote['nome']} ({lote['marca']}) acabou! Usado: {usado}")
-                
-        if qtd_restante_para_abater > 0:
-             log_msg.append(f"❌ ATENÇÃO: Faltou {qtd_restante_para_abater} de {nome_buscado}!")
+# --- 4. APP ---
 
-    return log_msg
-
-# --- 4. APP INTERFACE ---
-
-# --- LOGIN ---
+# Login Simples
 with st.sidebar:
-    st.title("🏭 Controle Industrial")
+    st.title("🔐 Acesso")
     senha = st.text_input("Senha", type="password")
     if senha != st.secrets.get("senha_app", "admin"):
-        st.warning("Acesso Bloqueado")
+        st.warning("Bloqueado")
         st.stop()
     st.success("Logado")
 
-st.title("Sistema de Gestão de Receitas & Estoque")
+st.title("🍳 Gestor de Receitas & Sobras")
 
-aba_armazem, aba_receita, aba_producao = st.tabs([
-    "📦 Armazém (Entrada)", 
-    "📝 Ficha Técnica (Receitas)", 
-    "⚙️ Produção & Baixa"
+# Estado temporário
+if 'ingredientes_temp' not in st.session_state:
+    st.session_state.ingredientes_temp = []
+
+# ABAS - Mantendo a estrutura visual que você gostou
+aba_criar, aba_estoque, aba_projeto, aba_ver = st.tabs([
+    "📝 Criar Receita", 
+    "📦 Ver Sobras/Estoque", 
+    "🔮 Projetar Produção",
+    "📊 Editar/Apagar"
 ])
 
-# ==================================================
-# ABA 1: ARMAZÉM (CADASTRO DE PRODUTOS ESPECÍFICOS)
-# ==================================================
-with aba_armazem:
-    st.header("Entrada de Mercadoria")
-    st.caption("Aqui você cadastra o produto exato que comprou (Marca, Mercado, Lote).")
+# ==========================================
+# ABA 1: CRIAR (A CARA ANTIGA + MARCAS)
+# ==========================================
+with aba_criar:
+    st.caption("Crie sua receita. O sistema calcula o custo e guarda o que sobrar no pacote automaticamente.")
     
     with st.container(border=True):
-        c1, c2, c3 = st.columns(3)
-        nome = c1.text_input("Produto (Genérico)", placeholder="Ex: Farinha de Trigo")
-        marca = c2.text_input("Marca", placeholder="Ex: Dona Benta")
-        mercado = c3.text_input("Fornecedor/Mercado", placeholder="Ex: Assaí")
+        st.subheader("Adicionar Ingrediente")
         
+        # Linha 1: O que é?
+        c1, c2, c3 = st.columns([2, 1, 1])
+        nome = c1.text_input("Nome do Ingrediente", placeholder="Ex: Creme de Leite")
+        marca = c2.text_input("Marca (Opcional)", placeholder="Ex: Nestlé")
+        mercado = c3.text_input("Mercado (Opcional)", placeholder="Ex: Atacadão")
+        
+        # Linha 2: Valores
         c4, c5, c6, c7 = st.columns(4)
-        preco = c4.number_input("Preço Pago (R$)", 0.0, format="%.2f")
-        tamanho = c5.number_input("Tamanho da Embalagem", 0.0)
+        preco = c4.number_input("Preço Pago (R$)", min_value=0.0, format="%.2f")
+        pacote = c5.number_input("Tamanho do Pacote", min_value=0.0)
         unidade = c6.selectbox("Unidade", ["g", "ml", "unid", "kg", "L"])
+        usado = c7.number_input("Qtd. Usada na Receita", min_value=0.0)
         
-        if c7.button("📥 Dar Entrada no Estoque", type="primary"):
-            if nome and tamanho > 0:
-                adicionar_estoque(nome, marca, mercado, preco, tamanho, unidade)
-                st.success(f"Entrada confirmada: {nome} - {marca}")
+        # Botão
+        if st.button("⬇️ Adicionar", type="primary"):
+            if nome and pacote > 0 and usado > 0:
+                custo_u = preco / pacote
+                st.session_state.ingredientes_temp.append({
+                    "nome": nome,
+                    "marca": marca if marca else "Genérico",
+                    "mercado": mercado,
+                    "preco_compra": preco,
+                    "tam_pacote": pacote,
+                    "unidade": unidade,
+                    "qtd_usada": usado,
+                    "custo_unitario": custo_u,
+                    "custo_final": custo_u * usado
+                })
                 st.rerun()
             else:
-                st.error("Preencha Nome e Tamanho")
+                st.error("Preencha nome, tamanho do pacote e quantidade usada.")
 
-    st.divider()
-    st.subheader("Estoque Atual Disponível")
-    estoque = pegar_estoque()
-    if estoque:
-        df_est = pd.DataFrame(estoque)
-        # Mostra colunas relevantes e formata
+    # Lista Atual
+    if st.session_state.ingredientes_temp:
+        st.divider()
+        st.subheader("Rascunho da Receita")
+        df = pd.DataFrame(st.session_state.ingredientes_temp)
         st.dataframe(
-            df_est[["nome", "marca", "mercado", "estoque_atual", "unidade", "preco_pago"]].style.format({"preco_pago": "R$ {:.2f}", "estoque_atual": "{:.1f}"}),
+            df[["nome", "marca", "qtd_usada", "unidade", "custo_final"]].style.format({"custo_final": "R$ {:.2f}"}),
             use_container_width=True
         )
+        
+        # Salvar
+        with st.form("salvar_form"):
+            col_n, col_a = st.columns(2)
+            rec_nome = col_n.text_input("Nome da Receita")
+            rec_autor = col_a.text_input("Autor")
+            
+            st.write("---")
+            # Checkbox Importante
+            guardar_sobras = st.checkbox("Salvar as sobras no estoque?", value=True, help="Se marcado, o que não foi usado do pacote vai para a aba 'Ver Sobras'.")
+            
+            if st.form_submit_button("💾 Salvar Receita"):
+                if rec_nome:
+                    salvar_receita_e_atualizar_sobras(rec_nome, rec_autor, st.session_state.ingredientes_temp, guardar_sobras)
+                    st.success(f"Receita '{rec_nome}' salva!")
+                    if guardar_sobras:
+                        st.info("📦 Sobras adicionadas ao estoque com sucesso.")
+                    st.session_state.ingredientes_temp = []
+                    st.rerun()
+        
+        if st.button("Limpar Rascunho"):
+            st.session_state.ingredientes_temp = []
+            st.rerun()
+
+# ==========================================
+# ABA 2: ESTOQUE (AS SOBRAS)
+# ==========================================
+with aba_estoque:
+    st.header("Armazém de Sobras")
+    st.caption("Aqui fica tudo que sobrou das compras das receitas anteriores.")
+    
+    estoque = pegar_estoque()
+    
+    if estoque:
+        # Filtra para mostrar só o que tem saldo positivo
+        estoque_ativo = [e for e in estoque if e['estoque_atual'] > 0]
+        
+        if estoque_ativo:
+            df_est = pd.DataFrame(estoque_ativo)
+            st.dataframe(
+                df_est[["nome", "marca", "estoque_atual", "unidade", "mercado"]].style.format({"estoque_atual": "{:.1f}"}),
+                use_container_width=True
+            )
+        else:
+            st.info("Nenhuma sobra registrada no momento.")
     else:
-        st.info("Armazém vazio.")
+        st.info("O armazém está vazio. Crie receitas marcando 'Salvar Sobras' para preencher aqui.")
 
-
-# ==================================================
-# ABA 2: RECEITAS (GENÉRICAS)
-# ==================================================
-with aba_receita:
-    st.header("Criar Ficha Técnica")
-    st.caption("A receita usa nomes genéricos. O custo é calculado pela média do estoque.")
-    
-    if 'temp_rec' not in st.session_state:
-        st.session_state.temp_rec = []
-        
-    estoque_disp = pegar_estoque()
-    # Pega apenas nomes únicos para o dropdown
-    nomes_unicos = sorted(list(set([i['nome'] for i in estoque_disp])))
-    
-    c1, c2, c3 = st.columns([2, 1, 1])
-    
-    if nomes_unicos:
-        sel_item = c1.selectbox("Ingrediente", nomes_unicos)
-        # Pega a unidade do primeiro item encontrado com esse nome só pra facilitar
-        ref_unid = next(i['unidade'] for i in estoque_disp if i['nome'] == sel_item)
-        
-        qtd_nec = c2.number_input(f"Qtd Necessária ({ref_unid})", 0.0)
-        
-        if c3.button("Adicionar Item"):
-            if qtd_nec > 0:
-                st.session_state.temp_rec.append({
-                    "nome": sel_item,
-                    "qtd": qtd_nec,
-                    "unidade": ref_unid
-                })
-    else:
-        st.warning("Cadastre itens no Armazém primeiro!")
-
-    if st.session_state.temp_rec:
-        st.divider()
-        st.write("### Itens da Receita:")
-        st.dataframe(pd.DataFrame(st.session_state.temp_rec), use_container_width=True)
-        
-        with st.form("salvar_rec"):
-            rn = st.text_input("Nome da Receita")
-            ra = st.text_input("Autor")
-            if st.form_submit_button("💾 Salvar Ficha Técnica"):
-                salvar_receita(rn, ra, st.session_state.temp_rec)
-                st.success("Receita Salva!")
-                st.session_state.temp_rec = []
-                st.rerun()
-
-# ==================================================
-# ABA 3: PLANEJAMENTO DE PRODUÇÃO (O GRANDE DIFERENCIAL)
-# ==================================================
-with aba_producao:
-    st.header("Planejamento de Produção")
-    st.caption("Simule quanto você quer produzir e o sistema verifica se tem estoque.")
+# ==========================================
+# ABA 3: PROJETAR PRODUÇÃO (REUTILIZAÇÃO)
+# ==========================================
+with aba_projeto:
+    st.header("Planejador de Produção")
+    st.caption("Se eu quiser fazer 5 bolos, minhas sobras são suficientes?")
     
     receitas = pegar_receitas()
+    estoque_atual = pegar_estoque()
     
-    if receitas:
-        # 1. Selecionar o que vai cozinhar
-        sel_receita_nome = st.selectbox("O que vamos cozinhar hoje?", [r['name'] for r in receitas])
-        dados_receita = next(r for r in receitas if r['name'] == sel_receita_nome)
+    if receitas and estoque_atual:
+        # 1. Seleciona Receita
+        rec_sel = st.selectbox("Escolha a Receita", [r['name'] for r in receitas])
+        dados_rec = next(r for r in receitas if r['name'] == rec_sel)
         
-        # 2. Quantas unidades?
-        qtd_producao = st.number_input("Quantas receitas (unidades) vamos fazer?", min_value=1, value=1)
+        # 2. Quantidade
+        qtd_fazer = st.number_input("Quantidade a produzir", min_value=1, value=1)
         
         st.divider()
-        
-        # 3. Cálculo de Necessidade
-        st.subheader("📦 Materiais Necessários vs. Estoque")
-        
-        plano_execucao = []
-        pode_produzir = True
+        st.subheader("Análise de Estoque")
         
         relatorio = []
+        pode_fazer = True
         
-        estoque_atual = pegar_estoque()
-        
-        for item in dados_receita['ingredients']:
-            total_necessario = item['qtd'] * qtd_producao
+        for item in dados_rec['ingredients']:
+            necessario = item['qtd_usada'] * qtd_fazer
             
-            # Soma todo o estoque disponível para esse nome (independente da marca)
-            total_em_estoque = sum(e['estoque_atual'] for e in estoque_atual if e['nome'] == item['nome'])
+            # Soma todas as marcas disponíveis desse ingrediente
+            disponivel = sum(e['estoque_atual'] for e in estoque_atual if e['nome'] == item['nome'])
             
-            status = "✅ OK" if total_em_estoque >= total_necessario else "❌ FALTA"
-            saldo_pos_producao = total_em_estoque - total_necessario
-            
-            if saldo_pos_producao < 0:
-                pode_produzir = False
+            saldo = disponivel - necessario
+            status = "✅ OK" if saldo >= 0 else "❌ COMPRAR"
             
             relatorio.append({
                 "Ingrediente": item['nome'],
-                "Necessário": total_necessario,
-                "Em Estoque (Total)": total_em_estoque,
-                "Sobra Prevista": saldo_pos_producao if saldo_pos_producao > 0 else 0,
+                "Necessário": necessario,
+                "Em Estoque": disponivel,
+                "Falta/Sobra": saldo,
                 "Status": status
             })
-            
-            plano_execucao.append({
-                "nome": item['nome'],
-                "qtd_necessaria": total_necessario
-            })
-            
+        
         st.dataframe(pd.DataFrame(relatorio), use_container_width=True)
         
-        st.write("---")
-        
-        # 4. Botão de Execução Real
-        c_act1, c_act2 = st.columns([3, 1])
-        
-        if c_act1.button("🏭 CONFIRMAR PRODUÇÃO E BAIXAR ESTOQUE", type="primary", disabled=not pode_produzir):
-            log = realizar_baixa_estoque(plano_execucao)
-            st.success("Produção Registrada! Estoque atualizado.")
-            with st.expander("Ver Log de Baixas"):
-                for linha in log:
-                    st.write(linha)
+        # Botão de Baixa Real
+        if st.button("Confirmar Produção e Deduzir do Estoque"):
+            # Lógica simplificada de baixa
+            falta_algo = any(r['Falta/Sobra'] < 0 for r in relatorio)
+            
+            if falta_algo:
+                st.error("Você não tem estoque suficiente para isso. Compre os itens que faltam.")
+            else:
+                # Processo de baixa
+                for item in dados_rec['ingredients']:
+                    a_abater = item['qtd_usada'] * qtd_fazer
                     
-        if not pode_produzir:
-            st.error("Não há estoque suficiente para essa produção. Compre os itens marcados com FALTA.")
+                    # Busca lotes disponíveis
+                    lotes = [e for e in pegar_estoque() if e['nome'] == item['nome'] and e['estoque_atual'] > 0]
+                    
+                    for lote in lotes:
+                        if a_abater <= 0: break
+                        
+                        id_lote = f"{lote['nome']}_{lote['marca']}".replace(" ", "_").lower()
+                        
+                        if lote['estoque_atual'] >= a_abater:
+                            db.collection("inventory").document(id_lote).update({"estoque_atual": lote['estoque_atual'] - a_abater})
+                            a_abater = 0
+                        else:
+                            a_abater -= lote['estoque_atual']
+                            db.collection("inventory").document(id_lote).update({"estoque_atual": 0})
+                
+                st.success("Estoque atualizado! Itens removidos do armazém.")
+                st.rerun()
 
-    else:
-        st.info("Cadastre receitas primeiro.")
+# ==========================================
+# ABA 4: VER/EDITAR (NORMAL)
+# ==========================================
+with aba_ver:
+    st.header("Biblioteca")
+    if receitas:
+        r_sel = st.selectbox("Ver Receita", [r['name'] for r in receitas], key="v_sel")
+        d_rec = next(r for r in receitas if r['name'] == r_sel)
+        
+        st.dataframe(pd.DataFrame(d_rec['ingredients'])[["nome", "marca", "qtd_usada", "custo_final"]], use_container_width=True)
+        
+        custo = d_rec['total_cost']
+        c1, c2 = st.columns(2)
+        c1.metric("Custo Receita", f"R$ {custo:.2f}")
+        
+        pv = c2.number_input("Preço Venda", value=custo*3)
+        if pv:
+            lucro = pv - custo
+            margem = (lucro/pv)*100
+            st.write(f"Margem: **{margem:.1f}%** (Lucro R$ {lucro:.2f})")
+        
+        if st.button("🗑️ Apagar Receita"):
+            doc_del = f"{d_rec['name']}_{d_rec['author']}".replace(" ", "_").lower()
+            db.collection("recipes").document(doc_del).delete()
+            st.rerun()
