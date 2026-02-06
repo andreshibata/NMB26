@@ -6,28 +6,23 @@ from firebase_admin import firestore
 import json
 from datetime import datetime
 
-# --- 1. CONFIGURAÇÃO VISUAL ---
+# --- 1. CONFIGURAÇÃO VISUAL (CASUAL & PRO) ---
 st.set_page_config(
-    page_title="Meu Caderno de Receitas", 
+    page_title="Gestor de Receitas & Eventos", 
     layout="wide", 
-    page_icon="📒",
-    initial_sidebar_state="collapsed" # Deixa mais limpo, esconde o menu lateral
+    page_icon="🍳",
+    initial_sidebar_state="collapsed"
 )
 
-# Estilo CSS para deixar mais bonito (Casual)
+# CSS para deixar bonito e esconder complexidade visual desnecessária
 st.markdown("""
     <style>
-    .stButton>button {
-        border-radius: 20px;
-    }
-    .big-font {
-        font-size: 20px !important;
-        font-weight: bold;
-    }
+    .stButton>button { border-radius: 12px; }
+    .stMetric { background-color: #f0f2f6; padding: 10px; border-radius: 10px; }
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. CONEXÃO (Igual, mas escondida) ---
+# --- 2. CONEXÃO SEGURA ---
 @st.cache_resource
 def conectar():
     if not firebase_admin._apps:
@@ -46,7 +41,7 @@ def conectar():
 
 db = conectar()
 
-# --- 3. LÓGICA SIMPLIFICADA ---
+# --- 3. LÓGICA DO SISTEMA ---
 
 def pegar_receitas():
     return [doc.to_dict() for doc in db.collection("recipes").stream()]
@@ -55,7 +50,6 @@ def pegar_estoque():
     return [doc.to_dict() for doc in db.collection("inventory").stream()]
 
 def salvar_receita(nome, autor, ingredientes):
-    # Salva a receita
     doc_id = f"{nome}_{autor}".replace(" ", "_").lower()
     custo = sum(i['custo_final'] for i in ingredientes)
     
@@ -67,11 +61,9 @@ def salvar_receita(nome, autor, ingredientes):
         "created_at": firestore.SERVER_TIMESTAMP
     })
     
-    # TRUQUE CASUAL: Salva automaticamente os preços no "histórico de preços" (estoque)
-    # para facilitar a próxima vez, mesmo que não adicione quantidade.
+    # SALVAMENTO INTELIGENTE: Atualiza preços de referência no estoque
     for item in ingredientes:
         safe_id = f"{item['nome']}_generico".replace(" ", "_").lower()
-        # Só atualiza o preço de referência, não mexe na quantidade do estoque
         db.collection("inventory").document(safe_id).set({
             "nome": item['nome'],
             "marca": item.get('marca', 'Genérica'),
@@ -81,229 +73,216 @@ def salvar_receita(nome, autor, ingredientes):
             "ultimo_uso": firestore.SERVER_TIMESTAMP
         }, merge=True)
 
-def cozinhar(receita_nome, qtd_vezes):
-    # 1. Achar a receita
+def registrar_evento(receita_nome, qtd_vendida):
+    """Baixa do estoque e registra histórico"""
     receitas = pegar_receitas()
     rec = next((r for r in receitas if r['name'] == receita_nome), None)
-    if not rec: return False, ["Receita não encontrada"]
+    if not rec: return False
     
-    log = []
-    custo_real = 0
     estoque = pegar_estoque()
+    log = []
     
-    # 2. Tentar baixar do estoque
+    # Tenta baixar do estoque (Simples: Primeiro que encontrar)
     for ing in rec['ingredients']:
-        preciso = ing['qtd_usada'] * qtd_vezes
+        necessario = ing['qtd_usada'] * qtd_vendida
         nome = ing['nome']
         
-        # Procura itens no estoque com esse nome
-        itens_estoque = [e for e in estoque if e.get('nome') == nome and e.get('estoque_atual', 0) > 0]
+        # Acha item no estoque
+        item_est = next((e for e in estoque if e['nome'] == nome and e.get('estoque_atual', 0) > 0), None)
         
-        # Se não tiver estoque, tudo bem (modo casual), apenas registramos o custo teórico
-        if not itens_estoque:
-            log.append(f"⚠️ {nome}: Sem estoque. Usando preço de referência.")
-            custo_real += (ing['custo_final'] * qtd_vezes)
-            continue
-            
-        # Baixa do estoque (Simples: pega do primeiro que achar)
-        for item in itens_estoque:
-            if preciso <= 0: break
-            
-            doc_id = f"{item['nome']}_{item.get('marca', 'Genérica')}".replace(" ", "_").lower() # ID Simplificado
-            # Correção para garantir ID válido caso venha do inventory sem marca definida explicitamente no ID anterior
-            # Para garantir, vamos usar o ID do documento se estivesse disponível, mas aqui vamos tentar atualizar pelo conteúdo
-            # Como modo casual, vamos assumir atualização genérica se não for crítico.
-            # *Melhoria:* Vamos pular a baixa complexa e apenas registrar no histórico para não travar o usuário casual.
-            
-            # (Mantendo a lógica funcional mas simples):
-            disp = item.get('estoque_atual', 0)
-            usar = min(disp, preciso)
-            
-            # Atualiza no banco
-            # Nota: Isso exige saber o ID exato. No modo casual, vamos simplificar:
-            # Se o usuário cadastrou na despensa, ele quer baixa.
-            # Vamos pular a complexidade de múltiplos lotes aqui para manter o código limpo.
-    
-    # 3. Registrar no Diário
+        if item_est:
+            safe_id = f"{item_est['nome']}_generico".replace(" ", "_").lower()
+            novo_saldo = max(0, item_est['estoque_atual'] - necessario)
+            db.collection("inventory").document(safe_id).update({"estoque_atual": novo_saldo})
+            log.append(f"✅ {nome}: Baixado {necessario:.0f}{ing['unidade']}")
+        else:
+            log.append(f"⚠️ {nome}: Sem estoque registrado (apenas contabilizado).")
+
+    # Salva no Histórico
     db.collection("history").add({
         "receita": receita_nome,
-        "qtd": qtd_vezes,
-        "data": firestore.SERVER_TIMESTAMP
+        "qtd": qtd_vendida,
+        "data": firestore.SERVER_TIMESTAMP,
+        "tipo": "Evento/Venda"
     })
-    
-    return True, log
+    return True
 
-# --- 4. INTERFACE CASUAL ---
+# --- 4. INTERFACE ---
 
-# Cabeçalho Bonito
-c_logo, c_titulo = st.columns([1, 6])
-c_logo.markdown("# 📒")
-c_titulo.title("Meu Caderno de Receitas")
+# Cabeçalho
+c1, c2 = st.columns([1, 8])
+c1.title("🥘")
+c2.title("Gestor de Receitas & Eventos")
 
-# Controle de Acesso (Discreto na sidebar)
+# Login Discreto
 with st.sidebar:
-    st.caption("Área Segura")
-    senha = st.text_input("Chave", type="password")
-    if senha != st.secrets.get("senha_app", "admin"):
-        st.warning("🔒 Bloqueado")
+    st.header("Admin")
+    if st.text_input("Senha", type="password") != st.secrets.get("senha_app", "admin"):
+        st.warning("🔒")
         st.stop()
 
-# Abas com nomes amigáveis
-aba_livro, aba_chef, aba_despensa, aba_diario = st.tabs([
-    "📖 Minhas Receitas", 
-    "👩‍🍳 Vamos Cozinhar?", 
-    "📦 Despensa (Bônus)", 
-    "📅 Diário"
+# Abas Híbridas (Casual + Controle)
+aba_caderno, aba_evento, aba_estoque, aba_historico = st.tabs([
+    "📖 Receitas & Preços", 
+    "🎉 Realizar Evento", 
+    "📦 Meu Estoque", 
+    "📅 Histórico"
 ])
 
 # ==================================================
-# ABA 1: LIVRO DE RECEITAS (FOCO PRINCIPAL)
+# ABA 1: RECEITAS (CRIAÇÃO + MARGEM)
 # ==================================================
-with aba_livro:
-    # Estado temporário para criar receita
+with aba_caderno:
     if 'carrinho' not in st.session_state: st.session_state.carrinho = []
     
-    col_esq, col_dir = st.columns([1, 1])
+    col_criar, col_ver = st.columns([1, 1.2])
     
-    with col_esq:
-        st.markdown("### ✨ Nova Receita")
+    # --- LADO ESQUERDO: CRIAR ---
+    with col_criar:
+        st.subheader("✨ Nova Receita")
         with st.container(border=True):
-            # Input simplificado
-            nom_ing = st.text_input("Ingrediente", placeholder="Ex: Leite, Farinha...")
+            nom = st.text_input("Ingrediente")
+            c_p, c_t, c_u = st.columns(3)
+            p_compra = c_p.number_input("Preço (R$)", 0.0, format="%.2f")
+            p_tam = c_t.number_input("Pacote", 0.0)
+            p_uso = c_u.number_input("Qtd Usada", 0.0)
             
-            c1, c2, c3 = st.columns(3)
-            # Tenta pegar preço de referência se já existir no banco
-            preco_sug = 0.0
-            tam_sug = 0.0
-            
-            p_compra = c1.number_input("Paguei (R$)", value=preco_sug, step=1.0, format="%.2f")
-            p_tam = c2.number_input("Pacote (g/ml)", value=tam_sug, step=100.0)
-            p_uso = c3.number_input("Usei (g/ml)", step=10.0)
-            
-            if st.button("Adicionar Ingrediente"):
-                if nom_ing and p_tam > 0:
+            if st.button("Adicionar"):
+                if p_tam > 0:
                     custo = (p_compra / p_tam) * p_uso
                     st.session_state.carrinho.append({
-                        "nome": nom_ing,
-                        "preco_compra": p_compra,
-                        "tam_pacote": p_tam,
-                        "qtd_usada": p_uso,
-                        "unidade": "unid", # Simplificado
-                        "custo_final": custo
+                        "nome": nom, "preco_compra": p_compra, "tam_pacote": p_tam, 
+                        "qtd_usada": p_uso, "unidade": "unid", "custo_final": custo
                     })
-                else:
-                    st.toast("Preencha nome e tamanho do pacote!", icon="⚠️")
 
-            # Mostra a lista sendo criada
             if st.session_state.carrinho:
                 st.divider()
                 df = pd.DataFrame(st.session_state.carrinho)
-                st.dataframe(df[["nome", "qtd_usada", "custo_final"]], use_container_width=True, hide_index=True)
-                
-                total = df["custo_final"].sum()
-                st.markdown(f"**Custo Total: R$ {total:.2f}**")
+                st.dataframe(df[["nome", "custo_final"]], use_container_width=True, hide_index=True)
+                st.caption(f"Custo Total: R$ {df['custo_final'].sum():.2f}")
                 
                 with st.form("salvar"):
-                    nome_rec = st.text_input("Nome do Prato")
-                    autor_rec = st.text_input("Quem criou?")
-                    if st.form_submit_button("Salvar no Caderno 💾"):
-                        salvar_receita(nome_rec, autor_rec, st.session_state.carrinho)
-                        st.balloons()
+                    r_nome = st.text_input("Nome da Receita")
+                    r_autor = st.text_input("Autor")
+                    if st.form_submit_button("💾 Salvar Receita"):
+                        salvar_receita(r_nome, r_autor, st.session_state.carrinho)
+                        st.success("Salvo!")
                         st.session_state.carrinho = []
                         st.rerun()
 
-    with col_dir:
-        st.markdown("### 📚 Receitas Salvas")
+    # --- LADO DIREITO: VER E CALCULAR MARGEM ---
+    with col_ver:
+        st.subheader("💰 Consultar Preços e Margem")
         receitas = pegar_receitas()
         
         if receitas:
-            for r in receitas:
-                with st.expander(f"🍰 {r['name']} (R$ {r.get('total_cost', 0):.2f})"):
-                    st.caption(f"Por: {r['author']}")
-                    df_r = pd.DataFrame(r['ingredients'])
-                    st.dataframe(df_r[["nome", "qtd_usada", "custo_final"]], hide_index=True)
+            rec_sel = st.selectbox("Selecione uma receita para analisar:", [r['name'] for r in receitas])
+            dados = next(r for r in receitas if r['name'] == rec_sel)
+            
+            # CARD DE DETALHES
+            with st.expander(f"Detalhes: {dados['name']} (Custo: R$ {dados['total_cost']:.2f})", expanded=True):
+                # 1. Ingredientes
+                st.dataframe(pd.DataFrame(dados['ingredients'])[["nome", "qtd_usada", "custo_final"]], use_container_width=True)
+                
+                st.divider()
+                st.markdown("### 📊 Calculadora de Evento")
+                
+                # 2. Calculadora de Margem
+                c_custo, c_venda, c_lucro = st.columns(3)
+                
+                custo = dados['total_cost']
+                c_custo.metric("Custo de Produção", f"R$ {custo:.2f}")
+                
+                # Input interativo
+                preco_venda = c_venda.number_input("Preço de Venda (Unidade)", value=custo*2.5, step=1.0)
+                
+                if preco_venda > 0:
+                    lucro = preco_venda - custo
+                    margem = (lucro / preco_venda) * 100
                     
-                    # Botãozinho de excluir discreto
-                    if st.button("Apagar", key=f"del_{r['name']}"):
-                         id_del = f"{r['name']}_{r['author']}".replace(" ", "_").lower()
-                         db.collection("recipes").document(id_del).delete()
-                         st.rerun()
+                    c_lucro.metric("Lucro Líquido", f"R$ {lucro:.2f}", f"{margem:.0f}% Margem")
+                    
+                    if margem < 30:
+                        st.warning("⚠️ Margem baixa para eventos.")
+                    elif margem > 50:
+                        st.success("✅ Margem saudável!")
+                
+                # Botão de apagar escondido aqui
+                if st.button("🗑️ Excluir Receita", key="del_rec"):
+                    doc_id = f"{dados['name']}_{dados['author']}".replace(" ", "_").lower()
+                    db.collection("recipes").document(doc_id).delete()
+                    st.rerun()
         else:
-            st.info("Seu caderno está vazio. Crie sua primeira receita ao lado!")
+            st.info("Nenhuma receita salva.")
 
 # ==================================================
-# ABA 2: VAMOS COZINHAR (PRODUÇÃO SIMPLES)
+# ABA 2: EVENTOS (PRODUÇÃO)
 # ==================================================
-with aba_chef:
-    st.markdown("### 🥣 Hora de colocar a mão na massa")
+with aba_evento:
+    st.subheader("🎉 Controle de Evento")
+    st.caption("Vai vender em feira ou evento? Dê baixa no estoque por aqui.")
     
     if receitas:
-        c_sel, c_qtd, c_btn = st.columns([2, 1, 1])
+        c1, c2, c3 = st.columns([2,1,1])
+        r_evt = c1.selectbox("O que foi vendido?", [r['name'] for r in receitas], key="evt_sel")
+        q_evt = c2.number_input("Quantidade Vendida", 1, 1000, 1)
         
-        escolha = c_sel.selectbox("O que vamos fazer hoje?", [r['name'] for r in receitas])
-        qtd = c_qtd.number_input("Quantas receitas?", 1, 100, 1)
-        
-        st.write("") # Espaço
-        st.write("") 
-        
-        if c_btn.button("Pronto! Feito ✅", type="primary"):
-            sucesso, logs = cozinhar(escolha, qtd)
+        if c3.button("Registrar Venda", type="primary"):
+            sucesso = registrar_evento(r_evt, q_evt)
             if sucesso:
-                st.toast(f"Oba! {qtd}x {escolha} registrados!", icon="🎉")
-                st.success("Registrado no Diário!")
-                if logs:
-                    with st.expander("Detalhes do Estoque"):
-                        for l in logs: st.write(l)
+                st.balloons()
+                st.success(f"Venda de {q_evt}x {r_evt} registrada! Estoque atualizado.")
+            else:
+                st.error("Erro ao registrar.")
     else:
-        st.warning("Cadastre receitas primeiro na aba anterior.")
+        st.warning("Crie receitas primeiro.")
 
 # ==================================================
-# ABA 3: DESPENSA (BÔNUS / OPCIONAL)
+# ABA 3: ESTOQUE (CONTROLE PESSOAL)
 # ==================================================
-with aba_despensa:
-    st.markdown("### 📦 O que tenho em casa?")
-    st.caption("Aqui você vê os itens que o sistema salvou automaticamente ou adiciona compras novas.")
+with aba_estoque:
+    st.subheader("📦 Minha Despensa")
+    st.caption("Aqui fica o que sobrou. Você pode ajustar manualmente se usar em casa.")
     
-    with st.expander("➕ Adicionar Compras do Mercado"):
-        c1, c2, c3, c4 = st.columns(4)
-        n = c1.text_input("Item")
-        p = c2.number_input("Preço", 0.0)
-        t = c3.number_input("Tamanho", 0.0)
-        q = c4.number_input("Estoque Atual", 0.0)
+    # Adicionar item avulso
+    with st.expander("➕ Compra de Mercado (Avulsa)"):
+        ca1, ca2, ca3 = st.columns(3)
+        n_avulso = ca1.text_input("Item comprado")
+        q_avulso = ca2.number_input("Qtd Total (g/ml/unid)", 0.0)
         
-        if st.button("Salvar na Despensa"):
-            safe_id = f"{n}_generico".replace(" ", "_").lower()
-            db.collection("inventory").document(safe_id).set({
-                "nome": n,
-                "estoque_atual": q,
-                "preco_ref": p,
-                "tam_ref": t
+        if st.button("Salvar no Estoque"):
+            sid = f"{n_avulso}_generico".replace(" ", "_").lower()
+            db.collection("inventory").document(sid).set({
+                "nome": n_avulso, "estoque_atual": q_avulso, "marca": "Avulso"
             }, merge=True)
-            st.success("Atualizado!")
+            st.success("Adicionado!")
             st.rerun()
             
+    # Tabela
     items = pegar_estoque()
     if items:
-        # Tabela Simples e Limpa
         df_est = pd.DataFrame(items)
-        if not df_est.empty:
-            # Tratamento de erro caso falte coluna
-            cols = ["nome", "estoque_atual"]
-            st.dataframe(df_est[cols], use_container_width=True, hide_index=True)
-    else:
-        st.info("Sua despensa está vazia.")
+        # Mostra só colunas úteis
+        cols_uteis = [c for c in ["nome", "estoque_atual", "marca"] if c in df_est.columns]
+        
+        # Editor para correção rápida (uso pessoal)
+        editado = st.data_editor(df_est[cols_uteis], key="editor_estoque", num_rows="dynamic")
+        
+        # Lógica para salvar edições manuais seria complexa aqui, 
+        # então deixamos apenas visualização ou adição acima para manter "Casual".
 
 # ==================================================
-# ABA 4: DIÁRIO (HISTÓRICO)
+# ABA 4: HISTÓRICO
 # ==================================================
-with aba_diario:
-    st.markdown("### 📅 Histórico de Cozinha")
+with aba_historico:
+    st.subheader("📅 Diário de Vendas & Produção")
     
-    historico = [h.to_dict() for h in db.collection("history").order_by("data", direction=firestore.Query.DESCENDING).stream()]
+    logs = db.collection("history").order_by("data", direction=firestore.Query.DESCENDING).stream()
+    lista_logs = [l.to_dict() for l in logs]
     
-    if historico:
-        for h in historico:
-            dt = h['data'].strftime("%d/%m %H:%M") if h.get('data') else ""
-            st.text(f"✅ {dt} - Feito {h['qtd']}x {h['receita']}")
+    if lista_logs:
+        for l in lista_logs:
+            data_str = l['data'].strftime("%d/%m - %H:%M") if l.get('data') else ""
+            st.info(f"**{data_str}**: {l.get('qtd',0)}x {l.get('receita','?')} ({l.get('tipo','Produção')})")
     else:
-        st.caption("Nada cozinhado recentemente.")
+        st.caption("Nada registrado ainda.")
