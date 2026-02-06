@@ -8,17 +8,17 @@ from datetime import datetime
 
 # --- 1. CONFIGURAÇÃO VISUAL ---
 st.set_page_config(
-    page_title="Planejador de Produção", 
+    page_title="Gestor de Lucro & Produção", 
     layout="wide", 
-    page_icon="🏭",
+    page_icon="💰",
     initial_sidebar_state="collapsed"
 )
 
-# Estilo Limpo
+# Estilo para destacar o Lucro
 st.markdown("""
     <style>
-    .stMetric { background-color: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 5px solid #ff4b4b; }
-    .big-font { font-size: 18px !important; font-weight: bold; }
+    .stMetric { background-color: #f0f2f6; border-radius: 8px; padding: 10px; border: 1px solid #dee2e6; }
+    div[data-testid="stMetricValue"] { font-size: 24px; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -41,16 +41,33 @@ def conectar():
 
 db = conectar()
 
-# --- 3. LÓGICA DE PRODUÇÃO ---
+# --- 3. LÓGICA DE DADOS ---
 
 def pegar_receitas():
-    return [doc.to_dict() for doc in db.collection("recipes").stream()]
+    docs = db.collection("recipes").stream()
+    lista = []
+    for doc in docs:
+        d = doc.to_dict()
+        d['id'] = doc.id
+        lista.append(d)
+    return lista
 
 def pegar_estoque():
     return [doc.to_dict() for doc in db.collection("inventory").stream()]
 
-def salvar_receita(nome, autor, ingredientes):
-    doc_id = f"{nome}_{autor}".replace(" ", "_").lower()
+def zerar_estoque_mantendo_precos():
+    """Define a quantidade de todos os itens para 0, mas mantém o cadastro"""
+    docs = db.collection("inventory").stream()
+    batch = db.batch()
+    for doc in docs:
+        ref = db.collection("inventory").document(doc.id)
+        batch.update(ref, {"estoque_atual": 0})
+    batch.commit()
+
+def salvar_receita(nome, autor, ingredientes, doc_id=None):
+    if not doc_id:
+        doc_id = f"{nome}_{autor}".replace(" ", "_").lower()
+    
     custo = sum(i['custo_final'] for i in ingredientes)
     
     db.collection("recipes").document(doc_id).set({
@@ -58,10 +75,9 @@ def salvar_receita(nome, autor, ingredientes):
         "author": autor,
         "ingredients": ingredientes,
         "total_cost": custo,
-        "created_at": firestore.SERVER_TIMESTAMP
-    })
+        "updated_at": firestore.SERVER_TIMESTAMP
+    }, merge=True)
     
-    # Atualiza preços de referência na despensa (para facilitar compras futuras)
     for item in ingredientes:
         safe_id = f"{item['nome']}_generico".replace(" ", "_").lower()
         db.collection("inventory").document(safe_id).set({
@@ -73,273 +89,311 @@ def salvar_receita(nome, autor, ingredientes):
             "ultimo_uso": firestore.SERVER_TIMESTAMP
         }, merge=True)
 
+def apagar_receita(doc_id):
+    db.collection("recipes").document(doc_id).delete()
+
+def atualizar_estoque_lote(df_editado):
+    for index, row in df_editado.iterrows():
+        safe_id = f"{row['nome']}_generico".replace(" ", "_").lower()
+        db.collection("inventory").document(safe_id).set({
+            "nome": row['nome'],
+            "estoque_atual": row['estoque_atual'],
+            "preco_ref": row['preco_ref'],
+            "tam_ref": row['tam_ref']
+        }, merge=True)
+
 def confirmar_producao(fila_producao):
-    """Baixa os ingredientes do estoque e registra a produção"""
     estoque = pegar_estoque()
-    
-    for item_plan in fila_producao:
-        receita = item_plan['dados_receita']
-        qtd_fazer = item_plan['qtd']
-        
+    for item in fila_producao:
+        receita = item['dados_receita']
+        qtd = item['qtd']
         for ing in receita['ingredients']:
-            necessario = ing['qtd_usada'] * qtd_fazer
+            necessario = ing['qtd_usada'] * qtd
             nome = ing['nome']
-            
-            # Busca o item no estoque para abater
             item_est = next((e for e in estoque if e['nome'] == nome), None)
-            
             if item_est:
                 safe_id = f"{item_est['nome']}_generico".replace(" ", "_").lower()
-                atual = item_est.get('estoque_atual', 0)
-                # Abate do estoque (não deixa ficar negativo, zera se acabar)
-                novo_saldo = max(0, atual - necessario)
+                novo = max(0, item_est.get('estoque_atual', 0) - necessario)
+                db.collection("inventory").document(safe_id).update({"estoque_atual": novo})
+                item_est['estoque_atual'] = novo
                 
-                db.collection("inventory").document(safe_id).update({"estoque_atual": novo_saldo})
-                # Atualiza lista local
-                item_est['estoque_atual'] = novo_saldo 
-                
-    # Registra no Histórico
     db.collection("history").add({
-        "tipo": "Produção Realizada",
+        "tipo": "Produção",
         "resumo": [f"{f['qtd']}x {f['nome']}" for f in fila_producao],
         "data": firestore.SERVER_TIMESTAMP,
-        "custo_total": sum(f['total_custo'] for f in fila_producao)
+        "custo_total": sum(f['total_custo'] for f in fila_producao),
+        "faturamento_previsto": sum(f.get('total_venda', 0) for f in fila_producao)
     })
     return True
 
 # --- 4. INTERFACE ---
 
 c1, c2 = st.columns([1, 10])
-c1.title("👩‍🍳")
-c2.title("Planejador de Produção")
+c1.title("💸")
+c2.title("Gestor de Produção & Margem")
 
 with st.sidebar:
-    st.caption("Acesso Restrito")
-    if st.text_input("Senha", type="password") != st.secrets.get("senha_app", "admin"):
+    if st.text_input("Senha Admin", type="password") != st.secrets.get("senha_app", "admin"):
         st.warning("🔒"); st.stop()
 
-# Armazena a fila de produção na memória
-if 'fila_producao' not in st.session_state: st.session_state.fila_producao = []
+# ESTADOS
+if 'fila_prod' not in st.session_state: st.session_state.fila_prod = []
+if 'editor_receita' not in st.session_state: st.session_state.editor_receita = []
 
 # ABAS
 aba_plan, aba_rec, aba_est, aba_hist = st.tabs([
-    "🚀 Planejar Produção", 
+    "🚀 Planejar (Margem)", 
     "📖 Receitas", 
     "📦 Despensa", 
     "📜 Histórico"
 ])
 
 # ==================================================
-# ABA 1: O PLANEJADOR (FOCO NO QUE PRECISA)
+# ABA 1: PLANEJADOR FINANCEIRO
 # ==================================================
 with aba_plan:
-    st.caption("Adicione o que você quer cozinhar. O sistema gera a lista de compras/separação.")
+    st.caption("Planeje sua produção, defina o preço de venda e veja se vai dar lucro.")
     
-    col_input, col_resumo = st.columns([1, 1.5])
+    col_in, col_out = st.columns([1, 1.6])
     
-    # --- 1. O QUE VAMOS FAZER? ---
-    with col_input:
+    # --- ESQUERDA: ADICIONAR ITEM ---
+    with col_in:
         with st.container(border=True):
-            st.subheader("1. Adicionar à Fila")
+            st.subheader("O que vamos produzir?")
             receitas = pegar_receitas()
             
             if receitas:
-                # Seleção
-                rec_sel = st.selectbox("Escolha a Receita", [r['name'] for r in receitas])
-                dados_rec = next(r for r in receitas if r['name'] == rec_sel)
+                r_sel = st.selectbox("Receita", [r['name'] for r in receitas])
+                dados_r = next(r for r in receitas if r['name'] == r_sel)
+                custo_base = dados_r['total_cost']
                 
-                # Quantidade
-                qtd = st.number_input("Quantidade a produzir", min_value=1, value=1)
+                c_q, c_v = st.columns(2)
+                qtd = c_q.number_input("Quantidade", 1, 1000, 10)
+                # Sugestão inteligente: 3x o custo
+                sugestao = custo_base * 3
+                preco_venda = c_v.number_input("Preço Venda (Unit)", value=sugestao, min_value=0.0, format="%.2f")
                 
-                # Botão Add
-                if st.button("➕ Incluir no Plano"):
-                    custo_base = dados_rec['total_cost']
-                    st.session_state.fila_producao.append({
-                        "nome": rec_sel,
-                        "qtd": qtd,
-                        "total_custo": custo_base * qtd,
-                        "dados_receita": dados_rec
+                if st.button("➕ Adicionar ao Plano"):
+                    custo_total = custo_base * qtd
+                    venda_total = preco_venda * qtd
+                    
+                    st.session_state.fila_prod.append({
+                        "nome": r_sel, 
+                        "qtd": qtd, 
+                        "custo_unit": custo_base,
+                        "venda_unit": preco_venda,
+                        "total_custo": custo_total, 
+                        "total_venda": venda_total,
+                        "dados_receita": dados_r
                     })
-            else:
-                st.warning("Sem receitas cadastradas.")
-
-        # Tabela do Plano Atual
-        if st.session_state.fila_producao:
+        
+        # Lista simples do que foi adicionado
+        if st.session_state.fila_prod:
             st.write("---")
-            st.markdown("##### Fila Atual:")
-            df_fila = pd.DataFrame(st.session_state.fila_producao)
-            st.dataframe(
-                df_fila[["qtd", "nome"]],
-                use_container_width=True,
-                hide_index=True
-            )
-            if st.button("🗑️ Limpar Plano"):
-                st.session_state.fila_producao = []
-                st.rerun()
-
-    # --- 2. O QUE PRECISO? (RESULTADO) ---
-    with col_resumo:
-        if st.session_state.fila_producao:
-            st.subheader("2. Materiais Necessários")
+            for idx, item in enumerate(st.session_state.fila_prod):
+                col_txt, col_del = st.columns([4, 1])
+                col_txt.text(f"{item['qtd']}x {item['nome']} (Venda: R${item['venda_unit']:.2f})")
+                if col_del.button("❌", key=f"del_q_{idx}"):
+                    st.session_state.fila_prod.pop(idx)
+                    st.rerun()
             
-            # Custo Total
-            total_custo = sum(i['total_custo'] for i in st.session_state.fila_producao)
-            st.metric("Custo Total de Produção (Estimado)", f"R$ {total_custo:.2f}")
+            if st.button("Limpar Tudo"): 
+                st.session_state.fila_prod = []; st.rerun()
+
+    # --- DIREITA: DASHBOARD DE LUCRO ---
+    with col_out:
+        if st.session_state.fila_prod:
+            st.subheader("📊 Análise Financeira do Evento")
+            
+            # CÁLCULOS TOTAIS
+            tot_custo = sum(x['total_custo'] for x in st.session_state.fila_prod)
+            tot_venda = sum(x['total_venda'] for x in st.session_state.fila_prod)
+            lucro = tot_venda - tot_custo
+            margem = (lucro / tot_venda * 100) if tot_venda > 0 else 0
+            
+            # MÉTRICAS
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Custo Produção", f"R$ {tot_custo:.2f}")
+            m2.metric("Faturamento", f"R$ {tot_venda:.2f}")
+            m3.metric("Lucro Líquido", f"R$ {lucro:.2f}", f"{margem:.1f}%")
+            
+            if margem < 30:
+                st.warning("⚠️ Margem baixa! Considere aumentar o preço de venda.")
             
             st.divider()
             
-            # CONSOLIDAR INGREDIENTES
-            # Soma farinha com farinha, ovo com ovo, etc.
-            lista_necessaria = {}
+            # MATERIAIS
+            st.subheader("🛒 Lista de Materiais")
             
-            for item in st.session_state.fila_producao:
-                qtd_rec = item['qtd']
+            # Consolida ingredientes
+            lista = {}
+            for item in st.session_state.fila_prod:
+                q = item['qtd']
                 for ing in item['dados_receita']['ingredients']:
                     nome = ing['nome']
-                    total = ing['qtd_usada'] * qtd_rec
-                    unidade = ing['unidade']
-                    
-                    if nome in lista_necessaria:
-                        lista_necessaria[nome]['qtd'] += total
-                    else:
-                        lista_necessaria[nome] = {'qtd': total, 'unidade': unidade}
+                    nec = ing['qtd_usada'] * q
+                    lista[nome] = lista.get(nome, 0) + nec
             
-            # CRUZAR COM ESTOQUE
-            estoque_real = pegar_estoque()
-            tabela_final = []
-            pode_produzir = True # Assume que sim até provar o contrário
+            estoque = pegar_estoque()
+            tabela = []
+            pode_produzir = True
             
-            for nome_ing, dados in lista_necessaria.items():
-                qtd_preciso = dados['qtd']
+            for nome, qtd_nec in lista.items():
+                item_est = next((e for e in estoque if e['nome'] == nome), None)
+                qtd_tem = item_est['estoque_atual'] if item_est else 0
+                falta = max(0, qtd_nec - qtd_tenho)
                 
-                # Busca no estoque
-                item_est = next((e for e in estoque_real if e['nome'] == nome_ing), None)
-                qtd_tenho = item_est['estoque_atual'] if item_est else 0
-                
-                falta = max(0, qtd_preciso - qtd_tenho)
-                
-                if falta > 0:
-                    status = f"🔴 Faltam {falta:.0f}"
-                    pode_produzir = False # Falta ingrediente, alerta visual (mas permitimos baixar igual se quiser)
-                else:
-                    status = "✅ Tenho"
-                
-                tabela_final.append({
-                    "Ingrediente": nome_ing,
-                    "Total Preciso": f"{qtd_preciso:.0f} {dados['unidade']}",
-                    "Na Despensa": f"{qtd_tenho:.0f}",
+                status = f"🔴 Falta {falta:.0f}" if falta > 0 else "✅ Ok"
+                tabela.append({
+                    "Item": nome,
+                    "Necessário": f"{qtd_nec:.0f}",
+                    "Estoque": f"{qtd_tenho:.0f}",
                     "Status": status
                 })
+                if falta > 0: pode_produzir = False
             
-            # Exibe a Lista de Separação
-            st.dataframe(pd.DataFrame(tabela_final), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(tabela), use_container_width=True, hide_index=True)
             
-            st.caption("Esta tabela mostra o que você precisa separar ou comprar.")
+            # AÇÃO FINAL
+            btn_txt = "🚀 Produzir (Baixar Estoque)" if pode_produzir else "⚠️ Produzir mesmo com falta"
+            btn_type = "primary" if pode_produzir else "secondary"
             
-            st.divider()
-            
-            # BOTÃO FINAL
-            btn_label = "✅ Produzir e Baixar Estoque" if pode_produzir else "⚠️ Produzir mesmo faltando itens"
-            tipo_btn = "primary" if pode_produzir else "secondary"
-            
-            if st.button(btn_label, type=tipo_btn):
-                confirmar_producao(st.session_state.fila_producao)
+            if st.button(btn_txt, type=btn_type):
+                confirmar_producao(st.session_state.fila_prod)
                 st.balloons()
-                st.success("Produção registrada e estoque atualizado!")
-                st.session_state.fila_producao = []
+                st.success("Produção registrada! Estoque baixado e histórico salvo.")
+                st.session_state.fila_prod = []
                 st.rerun()
-        
         else:
-            st.info("👈 Adicione receitas ao lado para ver a lista de materiais aqui.")
+            st.info("👈 Comece adicionando receitas para ver o cálculo de margem.")
 
 # ==================================================
-# ABA 2: RECEITAS (CRIAÇÃO)
+# ABA 2: RECEITAS (EDITOR)
 # ==================================================
 with aba_rec:
-    if 'carrinho' not in st.session_state: st.session_state.carrinho = []
+    modo = st.radio("Ação", ["Criar Nova", "Editar Existente"], horizontal=True)
     
-    c_new, c_list = st.columns(2)
-    
-    # Criar
-    with c_new:
-        st.subheader("Nova Ficha Técnica")
-        with st.container(border=True):
-            nom = st.text_input("Ingrediente (ex: Farinha)")
-            c_p, c_t, c_u = st.columns(3)
-            p_compra = c_p.number_input("Preço Pago (R$)", 0.0)
-            p_tam = c_t.number_input("Tam. Pacote", 0.0)
-            p_uso = c_u.number_input("Qtd Usada na Receita", 0.0)
-            
-            if st.button("Adicionar Item"):
-                if p_tam > 0:
-                    custo = (p_compra/p_tam)*p_uso
-                    st.session_state.carrinho.append({
-                        "nome": nom, "preco_compra": p_compra, "tam_pacote": p_tam,
-                        "qtd_usada": p_uso, "unidade": "unid", "custo_final": custo
+    if modo == "Criar Nova":
+        if 'novo_carrinho' not in st.session_state: st.session_state.novo_carrinho = []
+        c_form, c_view = st.columns(2)
+        with c_form:
+            with st.container(border=True):
+                n = st.text_input("Ingrediente", key="n_n")
+                c1, c2, c3 = st.columns(3)
+                p = c1.number_input("Preço", 0.0, key="p_n")
+                t = c2.number_input("Pacote", 0.0, key="t_n")
+                u = c3.number_input("Qtd Usada", 0.0, key="u_n")
+                if st.button("Add") and t > 0:
+                    st.session_state.novo_carrinho.append({
+                        "nome": n, "preco_compra": p, "tam_pacote": t, 
+                        "qtd_usada": u, "unidade": "unid", "custo_final": (p/t)*u
                     })
-            
-            if st.session_state.carrinho:
-                st.dataframe(pd.DataFrame(st.session_state.carrinho)[['nome', 'qtd_usada']], use_container_width=True)
-                with st.form("save"):
-                    rn = st.text_input("Nome Receita")
-                    ra = st.text_input("Autor")
-                    if st.form_submit_button("Salvar Receita"):
-                        salvar_receita(rn, ra, st.session_state.carrinho)
-                        st.session_state.carrinho = []
-                        st.success("Salvo!")
-                        st.rerun()
+        with c_view:
+            if st.session_state.novo_carrinho:
+                st.dataframe(pd.DataFrame(st.session_state.novo_carrinho))
+                with st.form("sv"):
+                    if st.form_submit_button("Salvar"):
+                        salvar_receita(st.text_input("Nome"), st.text_input("Autor"), st.session_state.novo_carrinho)
+                        st.session_state.novo_carrinho = []; st.success("Ok!"); st.rerun()
 
-    # Visualizar
-    with c_list:
-        st.subheader("Fichas Salvas")
-        lista = pegar_receitas()
-        if lista:
-            sel = st.selectbox("Ver Detalhes", [r['name'] for r in lista])
-            d = next(r for r in lista if r['name'] == sel)
-            st.dataframe(pd.DataFrame(d['ingredients'])[['nome', 'qtd_usada', 'custo_final']], hide_index=True)
-            st.caption(f"Custo Base da Receita: R$ {d['total_cost']:.2f}")
-            if st.button("🗑️ Apagar"):
-                doc = f"{d['name']}_{d['author']}".replace(" ", "_").lower()
-                db.collection("recipes").document(doc).delete()
+    else: # Editar
+        receitas = pegar_receitas()
+        if receitas:
+            sel = st.selectbox("Editar qual?", [r['name'] for r in receitas])
+            orig = next(r for r in receitas if r['name'] == sel)
+            if st.button("Carregar"):
+                st.session_state.editor_receita = orig['ingredients']
+                st.session_state.editor_id = orig['id']
+                st.session_state.editor_autor = orig['author']
                 st.rerun()
+            
+            if 'editor_id' in st.session_state and st.session_state.editor_id == orig['id']:
+                st.divider()
+                # Adicionar novo item na edição
+                with st.expander("➕ Adicionar Item"):
+                    cn1, cn2, cn3, cn4 = st.columns(4)
+                    new_n = cn1.text_input("Nome", key="ed_n")
+                    new_p = cn2.number_input("Preço", key="ed_p")
+                    new_t = cn3.number_input("Pacote", key="ed_t")
+                    new_u = cn4.number_input("Uso", key="ed_u")
+                    if st.button("Inserir") and new_t > 0:
+                        st.session_state.editor_receita.append({
+                            "nome": new_n, "preco_compra": new_p, "tam_pacote": new_t,
+                            "qtd_usada": new_u, "unidade": "unid", "custo_final": (new_p/new_t)*new_u
+                        }); st.rerun()
+                
+                df_ed = st.data_editor(pd.DataFrame(st.session_state.editor_receita), num_rows="dynamic", key="data_editor_rec")
+                
+                if st.button("💾 Salvar Alterações"):
+                    nova_lista = []
+                    for idx, row in df_ed.iterrows():
+                        if row['qtd_usada'] > 0:
+                            row['custo_final'] = (row['preco_compra']/row['tam_pacote'])*row['qtd_usada']
+                            nova_lista.append(row.to_dict())
+                    salvar_receita(sel, st.session_state.editor_autor, nova_lista, st.session_state.editor_id)
+                    st.success("Atualizado!")
+                
+                if st.button("🗑️ Apagar Receita"):
+                    apagar_receita(st.session_state.editor_id)
+                    st.rerun()
 
 # ==================================================
-# ABA 3: DESPENSA (ESTOQUE)
+# ABA 3: DESPENSA (ZERAR E EDITAR)
 # ==================================================
 with aba_est:
-    st.subheader("📦 Minha Despensa")
-    st.caption("Você pode ajustar manualmente se comprou mais coisas.")
+    c_tit, c_act = st.columns([4, 1])
+    c_tit.subheader("📦 Estoque")
     
-    with st.expander("➕ Entrada Manual (Compras)"):
-        ce1, ce2 = st.columns(2)
-        ne = ce1.text_input("Item comprado")
-        qe = ce2.number_input("Nova Quantidade Total que tenho", 0.0)
-        if st.button("Atualizar Estoque"):
-            sid = f"{ne}_generico".replace(" ", "_").lower()
-            db.collection("inventory").document(sid).set({"nome": ne, "estoque_atual": qe}, merge=True)
-            st.success("Atualizado")
+    # BOTÃO ZERAR ESTOQUE (NOVO!)
+    with c_act:
+        if st.button("🗑️ Zerar Todo Estoque", type="primary", help="Define a quantidade de todos os itens para 0"):
+            zerar_estoque_mantendo_precos()
+            st.warning("Estoque zerado! (Preços mantidos)")
             st.rerun()
+    
+    st.caption("Edite os valores na tabela abaixo.")
+    
+    estoque = pegar_estoque()
+    if estoque:
+        df_est = pd.DataFrame(estoque)
+        cols = ["nome", "estoque_atual", "preco_ref", "tam_ref"]
+        # Garante colunas
+        for c in cols: 
+            if c not in df_est.columns: df_est[c] = 0
             
-    items = pegar_estoque()
-    if items:
-        # Mostra apenas o que tem saldo positivo para ficar limpo
-        ativos = [i for i in items if i.get('estoque_atual', 0) > 0]
-        if ativos:
-            st.dataframe(pd.DataFrame(ativos)[['nome', 'estoque_atual']], use_container_width=True)
-        else:
-            st.info("Despensa vazia.")
+        editor = st.data_editor(
+            df_est[cols], 
+            column_config={
+                "nome": st.column_config.TextColumn("Item", disabled=True),
+                "estoque_atual": st.column_config.NumberColumn("Qtd Atual"),
+                "preco_ref": st.column_config.NumberColumn("Preço Ref (R$)"),
+                "tam_ref": st.column_config.NumberColumn("Pacote Ref")
+            },
+            use_container_width=True,
+            hide_index=True
+        )
+        
+        if st.button("💾 Salvar Alterações na Despensa"):
+            atualizar_estoque_lote(editor)
+            st.success("Salvo!")
+            st.rerun()
+    else:
+        st.info("Vazio.")
 
 # ==================================================
 # ABA 4: HISTÓRICO
 # ==================================================
 with aba_hist:
-    st.subheader("📜 Histórico de Produção")
+    st.subheader("📜 Histórico")
     logs = db.collection("history").order_by("data", direction=firestore.Query.DESCENDING).stream()
-    
     for l in logs:
         d = l.to_dict()
-        dt = d['data'].strftime("%d/%m - %H:%M") if d.get('data') else ""
+        dt = d['data'].strftime("%d/%m %H:%M") if d.get('data') else ""
+        fat = d.get('faturamento_previsto', 0)
         custo = d.get('custo_total', 0)
+        lucro = fat - custo
         
-        with st.expander(f"{dt} - Custo: R$ {custo:.2f}"):
+        with st.expander(f"{dt} | Lucro Est: R$ {lucro:.2f}"):
             st.write(d.get('resumo', []))
+            st.caption(f"Faturamento: R$ {fat:.2f} | Custo: R$ {custo:.2f}")
+
