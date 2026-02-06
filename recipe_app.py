@@ -6,7 +6,7 @@ from firebase_admin import firestore
 import json
 from datetime import datetime
 
-# --- 1. CONFIGURAÇÃO VISUAL CASUAL ---
+# --- 1. CONFIGURAÇÃO VISUAL ---
 st.set_page_config(
     page_title="Panela de Controle", 
     layout="wide", 
@@ -14,11 +14,11 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# CSS para deixar amigável (Botões redondos, cores suaves)
+# CSS Customizado (Botões redondos e fontes bonitas)
 st.markdown("""
     <style>
-    .stButton>button { border-radius: 20px; font-weight: bold; }
-    .stMetric { background-color: #f7f7f7; border-radius: 15px; padding: 10px; border: 1px solid #eee; }
+    .stButton>button { border-radius: 20px; font-weight: bold; width: 100%; }
+    .stDataFrame { border-radius: 10px; }
     h1 { color: #ff4b4b; }
     </style>
 """, unsafe_allow_html=True)
@@ -42,10 +42,9 @@ def conectar():
 
 db = conectar()
 
-# --- 3. LÓGICA (O CÉREBRO) ---
+# --- 3. LÓGICA DO SISTEMA ---
 
 def pegar_receitas():
-    # Retorna lista com IDs para edição
     docs = db.collection("recipes").stream()
     lista = []
     for doc in docs:
@@ -71,7 +70,7 @@ def salvar_receita(nome, autor, ingredientes, doc_id=None):
         "updated_at": firestore.SERVER_TIMESTAMP
     }, merge=True)
     
-    # Salva preços de referência na despensa (para o futuro)
+    # Atualiza referência de preço na despensa
     for item in ingredientes:
         safe_id = f"{item['nome']}_generico".replace(" ", "_").lower()
         db.collection("inventory").document(safe_id).set({
@@ -91,13 +90,13 @@ def confirmar_producao(fila_producao):
             necessario = ing['qtd_usada'] * qtd
             nome = ing['nome']
             
-            # Busca e desconta do estoque
+            # Baixa Estoque
             item_est = next((e for e in estoque if e['nome'] == nome), None)
             if item_est:
                 safe_id = f"{item_est['nome']}_generico".replace(" ", "_").lower()
                 novo_saldo = max(0, item_est.get('estoque_atual', 0) - necessario)
                 db.collection("inventory").document(safe_id).update({"estoque_atual": novo_saldo})
-                item_est['estoque_atual'] = novo_saldo # Atualiza localmente
+                item_est['estoque_atual'] = novo_saldo
                 
     db.collection("history").add({
         "tipo": "Produção/Evento",
@@ -119,253 +118,221 @@ def zerar_estoque():
 def apagar_receita(doc_id):
     db.collection("recipes").document(doc_id).delete()
 
-# --- 4. INTERFACE ---
+# --- 4. FUNÇÃO VISUAL (CARTÕES COLORIDOS) ---
+def cartao_financeiro(titulo, valor, cor_fundo, cor_texto, icone):
+    st.markdown(f"""
+    <div style="background-color: {cor_fundo}; padding: 15px; border-radius: 15px; border-left: 5px solid {cor_texto}; margin-bottom: 10px;">
+        <p style="color: {cor_texto}; font-size: 14px; margin: 0; font-weight: bold;">{icone} {titulo}</p>
+        <p style="color: #333; font-size: 24px; margin: 0; font-weight: bold;">R$ {valor:,.2f}</p>
+    </div>
+    """, unsafe_allow_html=True)
 
-c_tit1, c_tit2 = st.columns([1, 8])
-c_tit1.markdown("# 🥘")
-c_tit2.title("Panela de Controle")
+# --- 5. INTERFACE ---
 
-# Login Discreto
+c_head1, c_head2 = st.columns([1, 8])
+c_head1.markdown("# 🥘")
+c_head2.title("Panela de Controle")
+
 with st.sidebar:
-    st.caption("Admin Area")
+    st.caption("Admin")
     if st.text_input("Senha", type="password") != st.secrets.get("senha_app", "admin"):
-        st.warning("🔒")
-        st.stop()
+        st.warning("🔒"); st.stop()
 
 # ESTADO
 if 'carrinho' not in st.session_state: st.session_state.carrinho = []
 if 'fila_eventos' not in st.session_state: st.session_state.fila_eventos = []
 
-# ABAS AMIGÁVEIS
+# ABAS
 aba_criar, aba_evento, aba_despensa, aba_diario = st.tabs([
     "📝 Criar Receitas", 
-    "🎉 Eventos & Margem", 
+    "📊 Eventos & Lucro", 
     "📦 Despensa", 
     "📜 Diário"
 ])
 
 # ==================================================
-# ABA 1: CRIAR (INPUT CLÁSSICO - CASUAL)
+# ABA 1: CRIAR RECEITA
 # ==================================================
 with aba_criar:
-    st.caption("Adicione os ingredientes como se estivesse lendo a embalagem.")
+    st.caption("Monte sua receita passo a passo.")
     
-    col_form, col_lista = st.columns([1, 1.2])
+    col_input, col_preview = st.columns([1, 1.2])
     
-    # --- FORMULÁRIO (Igual à Versão 1) ---
-    with col_form:
+    with col_input:
         with st.container(border=True):
             st.subheader("Novo Ingrediente")
+            nome = st.text_input("Nome (ex: Leite)")
             
-            nome_ing = st.text_input("Nome do Ingrediente", placeholder="Ex: Farinha de Trigo")
-            
-            # Linha de Preços e Tamanho (A Lógica original)
             c1, c2 = st.columns(2)
-            preco_pago = c1.number_input("Preço Pago (R$)", min_value=0.0, format="%.2f")
-            tam_pacote = c2.number_input("Tamanho Pacote", min_value=0.0)
+            p_compra = c1.number_input("Preço Pago (R$)", 0.0, format="%.2f")
+            t_pacote = c2.number_input("Tamanho Pacote", 0.0)
             
-            # Linha de Uso
             c3, c4 = st.columns(2)
-            unidade = c3.selectbox("Unidade", ["g", "ml", "unid", "kg", "L"])
-            qtd_usada = c4.number_input("Qtd. Usada na Receita", min_value=0.0)
+            unid = c3.selectbox("Unid.", ["g", "ml", "unid", "kg", "L"])
+            uso = c4.number_input("Qtd Usada", 0.0)
             
-            if st.button("⬇️ Colocar na Receita", type="primary"):
-                if nome_ing and tam_pacote > 0:
-                    custo_final = (preco_pago / tam_pacote) * qtd_usada
+            if st.button("⬇️ Adicionar Item"):
+                if t_pacote > 0:
+                    custo = (p_compra / t_pacote) * uso
                     st.session_state.carrinho.append({
-                        "nome": nome_ing,
-                        "preco_compra": preco_pago,
-                        "tam_pacote": tam_pacote,
-                        "unidade": unidade,
-                        "qtd_usada": qtd_usada,
-                        "custo_final": custo_final
+                        "nome": nome, "preco_compra": p_compra, "tam_pacote": t_pacote,
+                        "unidade": unid, "qtd_usada": uso, "custo_final": custo
                     })
-                else:
-                    st.toast("Preencha o nome e tamanho do pacote!", icon="⚠️")
-
-    # --- LISTA DE INGREDIENTES ---
-    with col_lista:
-        st.subheader("Rascunho da Receita")
-        
+    
+    with col_preview:
+        st.subheader("Rascunho")
         if st.session_state.carrinho:
             df = pd.DataFrame(st.session_state.carrinho)
-            # Mostra tabelinha limpa
-            st.dataframe(
-                df[["nome", "qtd_usada", "unidade", "custo_final"]],
-                use_container_width=True,
-                hide_index=True
-            )
+            st.dataframe(df[["nome", "qtd_usada", "custo_final"]], use_container_width=True, hide_index=True)
             
             custo_total = df['custo_final'].sum()
-            st.metric("Custo Total da Receita", f"R$ {custo_total:.2f}")
+            cartao_financeiro("Custo da Receita", custo_total, "#FFF3E0", "#FF9800", "🏷️")
             
-            st.divider()
+            with st.form("save"):
+                n_rec = st.text_input("Nome do Prato")
+                n_aut = st.text_input("Chef")
+                if st.form_submit_button("💾 Salvar Receita"):
+                    salvar_receita(n_rec, n_aut, st.session_state.carrinho)
+                    st.balloons()
+                    st.session_state.carrinho = []; st.rerun()
             
-            with st.form("salvar_receita"):
-                c_nome, c_autor = st.columns(2)
-                r_nome = c_nome.text_input("Nome do Prato")
-                r_autor = c_autor.text_input("Chef (Autor)")
-                
-                if st.form_submit_button("💾 Salvar no Caderno"):
-                    if r_nome:
-                        salvar_receita(r_nome, r_autor, st.session_state.carrinho)
-                        st.balloons()
-                        st.session_state.carrinho = []
-                        st.rerun()
-                    else:
-                        st.error("Dê um nome para a receita.")
-            
-            if st.button("Limpar Rascunho"):
-                st.session_state.carrinho = []
-                st.rerun()
+            if st.button("Limpar"):
+                st.session_state.carrinho = []; st.rerun()
         else:
-            st.info("Adicione ingredientes ao lado para começar.")
-            
-            # Área para ver/apagar receitas existentes (simplificada)
+            # Lista receitas salvas para apagar
             with st.expander("Ver receitas salvas"):
-                receitas = pegar_receitas()
-                if receitas:
-                    sel = st.selectbox("Selecione", [r['name'] for r in receitas])
-                    rec_sel = next(r for r in receitas if r['name'] == sel)
-                    st.dataframe(pd.DataFrame(rec_sel['ingredients'])[['nome', 'qtd_usada']])
-                    if st.button("🗑️ Apagar Receita"):
-                        apagar_receita(rec_sel['id'])
-                        st.rerun()
+                rec_list = pegar_receitas()
+                if rec_list:
+                    sel = st.selectbox("Receita", [r['name'] for r in rec_list])
+                    sel_d = next(r for r in rec_list if r['name'] == sel)
+                    if st.button("🗑️ Apagar"):
+                        apagar_receita(sel_d['id']); st.rerun()
 
 # ==================================================
-# ABA 2: EVENTOS & MARGEM (O PLANEJADOR)
+# ABA 2: EVENTOS (CORES NOVAS AQUI!)
 # ==================================================
 with aba_evento:
-    st.caption("Vai fazer um evento? Planeje aqui a produção, veja o lucro e a lista de compras.")
+    st.caption("Planejador Financeiro de Eventos")
     
-    c_plan, c_resumo = st.columns([1, 1.5])
+    c_plan, c_dash = st.columns([1, 1.5])
     
     with c_plan:
         with st.container(border=True):
-            st.subheader("Adicionar ao Evento")
+            st.subheader("Planejar Produção")
             receitas = pegar_receitas()
-            
             if receitas:
-                r_escolha = st.selectbox("Qual receita?", [r['name'] for r in receitas])
-                dados_r = next(r for r in receitas if r['name'] == r_escolha)
-                custo_base = dados_r['total_cost']
+                r_sel = st.selectbox("Escolha o prato", [r['name'] for r in receitas])
+                d_rec = next(r for r in receitas if r['name'] == r_sel)
                 
-                # Inputs de Planejamento
-                q_evt = st.number_input("Quantidade", 1, 1000, 10)
-                v_evt = st.number_input("Preço de Venda (Unidade)", value=custo_base*3.0, format="%.2f")
+                qtd_evt = st.number_input("Quantidade", 1, 5000, 10)
                 
-                if st.button("➕ Incluir"):
+                # Sugestão de preço
+                custo_base = d_rec['total_cost']
+                venda_evt = st.number_input("Preço Venda (Unit)", value=custo_base*3.0, format="%.2f")
+                
+                if st.button("➕ Adicionar"):
                     st.session_state.fila_eventos.append({
-                        "nome": r_escolha,
-                        "qtd": q_evt,
-                        "custo_unit": custo_base,
-                        "venda_unit": v_evt,
-                        "total_custo": custo_base * q_evt,
-                        "total_venda": v_evt * q_evt,
-                        "dados_receita": dados_r
+                        "nome": r_sel, "qtd": qtd_evt, "total_custo": custo_base*qtd_evt,
+                        "total_venda": venda_evt*qtd_evt, "dados_receita": d_rec
                     })
-    
+        
         if st.session_state.fila_eventos:
-            if st.button("Limpar Planejamento"):
+            if st.button("Limpar Lista"):
                 st.session_state.fila_eventos = []; st.rerun()
 
-    with c_resumo:
+    with c_dash:
         if st.session_state.fila_eventos:
-            st.subheader("📊 Resumo Financeiro")
+            st.subheader("📊 Resultado Financeiro")
             
-            total_custo = sum(i['total_custo'] for i in st.session_state.fila_eventos)
-            total_venda = sum(i['total_venda'] for i in st.session_state.fila_eventos)
-            lucro = total_venda - total_custo
-            margem = (lucro / total_venda * 100) if total_venda > 0 else 0
+            custo_tot = sum(x['total_custo'] for x in st.session_state.fila_eventos)
+            venda_tot = sum(x['total_venda'] for x in st.session_state.fila_eventos)
+            lucro = venda_tot - custo_tot
+            margem = (lucro/venda_tot)*100 if venda_tot > 0 else 0
             
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Custo Estimado", f"R$ {total_custo:.2f}")
-            m2.metric("Faturamento", f"R$ {total_venda:.2f}")
-            m3.metric("Lucro Líquido", f"R$ {lucro:.2f}", f"{margem:.1f}%")
+            # --- CARTÕES COLORIDOS ---
+            col_c, col_f, col_l = st.columns(3)
             
+            with col_c:
+                # Vermelho Claro (Custo)
+                cartao_financeiro("Custo Total", custo_tot, "#FFEBEE", "#D32F2F", "🔴")
+            
+            with col_f:
+                # Azul Claro (Faturamento)
+                cartao_financeiro("Faturamento", venda_tot, "#E3F2FD", "#1976D2", "🔵")
+                
+            with col_l:
+                # Verde (Lucro) ou Laranja (Prejuízo)
+                cor_bg = "#E8F5E9" if lucro >= 0 else "#FFEBEE"
+                cor_tx = "#388E3C" if lucro >= 0 else "#D32F2F"
+                cartao_financeiro("Lucro Líquido", lucro, cor_bg, cor_tx, "🤑")
+
+            # Barra de progresso da margem
+            st.caption(f"Margem de Lucro: {margem:.1f}%")
+            if margem > 0:
+                st.progress(min(int(margem), 100))
+            else:
+                st.warning("Prejuízo estimado!")
+
             st.divider()
             
-            st.subheader("🛒 Lista de Compras / Separação")
-            
-            # Consolida Lista
+            # Lista de Compras
+            st.subheader("🛒 Lista de Compras")
             lista_nec = {}
             for item in st.session_state.fila_eventos:
                 q = item['qtd']
-                for ing in item['dados_receita']['ingredients']:
-                    nome = ing['nome']
-                    total = ing['qtd_usada'] * q
-                    lista_nec[nome] = lista_nec.get(nome, 0) + total
+                for i in item['dados_receita']['ingredients']:
+                    lista_nec[i['nome']] = lista_nec.get(i['nome'], 0) + (i['qtd_usada']*q)
             
             estoque = pegar_estoque()
-            tabela_compras = []
+            tab_compra = []
             tudo_ok = True
             
-            for nome, qtd_preciso in lista_nec.items():
-                # Verifica estoque
-                item_est = next((e for e in estoque if e['nome'] == nome), None)
-                qtd_tenho = item_est['estoque_atual'] if item_est else 0
-                falta = max(0, qtd_preciso - qtd_tenho)
-                
-                status = "✅ Tenho" if falta == 0 else f"❌ Falta {falta:.0f}"
-                tabela_compras.append({
-                    "Ingrediente": nome,
-                    "Preciso": f"{qtd_preciso:.0f}",
-                    "Tenho": f"{qtd_tenho:.0f}",
-                    "Status": status
-                })
+            for nome, qtd in lista_nec.items():
+                e_item = next((e for e in estoque if e['nome'] == nome), None)
+                tem = e_item['estoque_atual'] if e_item else 0
+                falta = max(0, qtd - tem)
+                status = "✅ Ok" if falta == 0 else f"❌ Falta {falta:.0f}"
+                tab_compra.append({"Item": nome, "Preciso": qtd, "Tenho": tem, "Status": status})
                 if falta > 0: tudo_ok = False
             
-            st.dataframe(pd.DataFrame(tabela_compras), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(tab_compra), use_container_width=True, hide_index=True)
             
             # Botão Produzir
-            st.caption("Ao clicar abaixo, os ingredientes serão descontados da despensa.")
-            texto_btn = "🚀 Produzir e Baixar Estoque" if tudo_ok else "⚠️ Produzir com itens faltando"
-            cor_btn = "primary" if tudo_ok else "secondary"
+            txt_btn = "🚀 Confirmar Produção (Baixar Estoque)" if tudo_ok else "⚠️ Produzir com Falta de Itens"
+            type_btn = "primary" if tudo_ok else "secondary"
             
-            if st.button(texto_btn, type=cor_btn):
+            if st.button(txt_btn, type=type_btn):
                 confirmar_producao(st.session_state.fila_eventos)
-                st.balloons()
-                st.success("Produção registrada com sucesso!")
-                st.session_state.fila_eventos = []
-                st.rerun()
+                st.balloons(); st.success("Registrado!"); st.session_state.fila_eventos = []; st.rerun()
         else:
-            st.info("Planeje seu evento na esquerda para ver os cálculos aqui.")
+            st.info("👈 Adicione itens ao planejamento.")
 
 # ==================================================
 # ABA 3: DESPENSA
 # ==================================================
 with aba_despensa:
-    st.subheader("📦 O que tenho em casa")
+    st.subheader("📦 Despensa")
+    c_btn1, c_btn2 = st.columns([4, 1])
+    with c_btn2:
+        if st.button("🗑️ Zerar Tudo"):
+            zerar_estoque(); st.warning("Zerado!"); st.rerun()
     
-    col_view, col_action = st.columns([4, 1])
-    
-    with col_action:
-        if st.button("🗑️ Zerar Estoque", help="Define todas as quantidades como 0, mas mantém os preços."):
-            zerar_estoque()
-            st.warning("Despensa esvaziada!")
-            st.rerun()
+    with st.expander("➕ Compra Manual"):
+        cx1, cx2 = st.columns(2)
+        ni = cx1.text_input("Item")
+        qi = cx2.number_input("Qtd", 0.0)
+        if st.button("Salvar") and ni:
+            sid = f"{ni}_generico".replace(" ", "_").lower()
+            db.collection("inventory").document(sid).set({"nome": ni, "estoque_atual": qi}, merge=True)
+            st.success("Ok!"); st.rerun()
             
-    # Entrada manual rápida
-    with st.expander("➕ Ajuste Manual (Adicionar Compras)"):
-        ce1, ce2 = st.columns(2)
-        ne = ce1.text_input("Item")
-        qe = ce2.number_input("Nova Quantidade Total", 0.0)
-        if st.button("Atualizar Item"):
-            sid = f"{ne}_generico".replace(" ", "_").lower()
-            # Salva mantendo campos existentes se houver
-            db.collection("inventory").document(sid).set({"nome": ne, "estoque_atual": qe}, merge=True)
-            st.success("Salvo!")
-            st.rerun()
-
     items = pegar_estoque()
     if items:
-        # Mostra apenas o que tem quantidade > 0 para ficar limpo
-        ativos = [i for i in items if i.get('estoque_atual', 0) > 0]
-        if ativos:
-            df_est = pd.DataFrame(ativos)
-            st.dataframe(df_est[['nome', 'estoque_atual']], use_container_width=True, hide_index=True)
+        validos = [i for i in items if i.get('estoque_atual', 0) > 0]
+        if validos:
+            st.dataframe(pd.DataFrame(validos)[['nome', 'estoque_atual']], use_container_width=True)
         else:
-            st.info("Despensa está zerada.")
+            st.info("Vazio.")
 
 # ==================================================
 # ABA 4: DIÁRIO
@@ -373,14 +340,12 @@ with aba_despensa:
 with aba_diario:
     st.subheader("📜 Histórico")
     logs = db.collection("history").order_by("data", direction=firestore.Query.DESCENDING).stream()
-    
     for l in logs:
         d = l.to_dict()
-        dt = d['data'].strftime("%d/%m - %H:%M") if d.get('data') else "-"
-        fat = d.get('faturamento', 0)
-        custo = d.get('custo_total', 0)
-        lucro = fat - custo
+        dt = d['data'].strftime("%d/%m %H:%M") if d.get('data') else "-"
+        lucro_hist = d.get('faturamento',0) - d.get('custo_total',0)
+        cor = "green" if lucro_hist >= 0 else "red"
         
-        with st.expander(f"{dt} | Lucro: R$ {lucro:.2f}"):
-            st.write(d.get('resumo', []))
-            st.caption(f"Venda: R$ {fat:.2f} | Custo: R$ {custo:.2f}")
+        with st.expander(f"{dt} | Lucro: R$ {lucro_hist:.2f}"):
+            st.write(d.get('resumo'))
+            st.markdown(f"**Venda:** R$ {d.get('faturamento',0):.2f} | **Custo:** R$ {d.get('custo_total',0):.2f}")
