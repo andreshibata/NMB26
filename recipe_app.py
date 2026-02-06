@@ -6,42 +6,40 @@ from firebase_admin import firestore
 import json
 
 # --- 1. CONFIGURAÇÃO ---
-st.set_page_config(page_title="Calculadora de Receitas", layout="wide", page_icon="🍳")
+st.set_page_config(page_title="Gestor de Receitas", layout="wide", page_icon="🍳")
 
-# --- 2. CONEXÃO SEGURA (BANCO DE DADOS) ---
+# --- 2. CONEXÃO SEGURA ---
 @st.cache_resource
 def conectar_banco():
     if not firebase_admin._apps:
         try:
-            # Tenta conectar com arquivo local (no seu computador)
+            # Tenta local
             cred = credentials.Certificate("firebase_key.json") 
             firebase_admin.initialize_app(cred)
         except:
-            # Tenta conectar com segredos da nuvem (na internet)
+            # Tenta nuvem
             if "textkey" in st.secrets:
                 key_dict = json.loads(st.secrets["textkey"])
                 cred = credentials.Certificate(key_dict)
                 firebase_admin.initialize_app(cred)
             else:
-                st.error("❌ Erro: Chave do banco de dados não encontrada.")
+                st.error("❌ Erro: Chave do banco não encontrada.")
                 st.stop()
     return firestore.client()
 
 db = conectar_banco()
 
-# --- 3. FUNÇÕES (O CÉREBRO) ---
+# --- 3. FUNÇÕES ---
 
 def pegar_despensa_dict():
-    """Baixa os ingredientes para preencher o formulário automaticamente"""
     docs = db.collection("ingredients").stream()
-    # Cria um dicionário: {'Farinha': {'preco': 5.0...}, ...}
     return {doc.to_dict()['name']: doc.to_dict() for doc in docs}
 
-def salvar_receita(nome, autor, ingredientes):
-    # 1. Salva a Receita
+def salvar_nova_receita(nome, autor, ingredientes):
     doc_id = f"{nome.replace(' ', '_').lower()}_{autor.replace(' ', '_').lower()}"
     custo_total = sum(i['custo_final'] for i in ingredientes)
     
+    # Salva Receita
     db.collection("recipes").document(doc_id).set({
         "name": nome,
         "author": autor,
@@ -50,7 +48,7 @@ def salvar_receita(nome, autor, ingredientes):
         "created_at": firestore.SERVER_TIMESTAMP
     })
     
-    # 2. Atualiza a Despensa Global (Salva os preços novos automaticamente)
+    # Atualiza Despensa
     for item in ingredientes:
         safe_id = item['nome'].replace(" ", "_").lower()
         db.collection("ingredients").document(safe_id).set({
@@ -61,187 +59,249 @@ def salvar_receita(nome, autor, ingredientes):
             "price_per_unit": item['custo_unitario']
         })
 
-def pegar_todas_receitas():
-    docs = db.collection("recipes").stream()
-    return [doc.to_dict() for doc in docs]
+def atualizar_receita_existente(doc_id, nome, autor, ingredientes):
+    custo_total = sum(i['custo_final'] for i in ingredientes)
+    db.collection("recipes").document(doc_id).set({
+        "name": nome,
+        "author": autor,
+        "ingredients": ingredientes,
+        "total_cost": custo_total,
+        "updated_at": firestore.SERVER_TIMESTAMP
+    }, merge=True)
 
-# --- 4. ESTADO DA SESSÃO (MEMÓRIA TEMPORÁRIA) ---
+def apagar_receita(doc_id):
+    db.collection("recipes").document(doc_id).delete()
+
+def pegar_todas_receitas_com_id():
+    docs = db.collection("recipes").stream()
+    lista = []
+    for doc in docs:
+        d = doc.to_dict()
+        d['id'] = doc.id
+        lista.append(d)
+    return lista
+
+# --- 4. ESTADO DA SESSÃO ---
 if 'ingredientes_temp' not in st.session_state:
     st.session_state.ingredientes_temp = []
+if 'buffer_edicao' not in st.session_state:
+    st.session_state.buffer_edicao = []
 
 # --- 5. APLICATIVO ---
 
-# --- BARRA LATERAL (LOGIN) ---
+# --- LOGIN ---
 with st.sidebar:
-    st.image("https://cdn-icons-png.flaticon.com/512/3565/3565418.png", width=100)
-    st.title("Acesso Restrito 🔒")
-    
-    # Verifica a senha definida nos "Secrets"
-    senha_digitada = st.text_input("Digite a Senha do Grupo", type="password")
-    
-    # Se não houver senha configurada, usa "admin" como padrão
+    st.title("🔐 Acesso")
+    senha_digitada = st.text_input("Senha", type="password")
     senha_correta = st.secrets.get("senha_app", "admin")
     
     if senha_digitada == senha_correta:
-        st.success("Acesso Liberado! ✅")
-        acesso_permitido = True
+        st.success("Conectado")
+        acesso = True
     else:
-        st.warning("Digite a senha para usar.")
-        acesso_permitido = False
+        st.warning("Digite a senha.")
+        acesso = False
 
-# Se a senha estiver errada, o app para de carregar aqui
-if not acesso_permitido:
+if not acesso:
     st.stop()
 
 # --- TELA PRINCIPAL ---
-st.title("🍳 Calculadora de Custos & Precificação")
+st.title("🍳 Gestor Profissional de Receitas")
 
-# Busca ingredientes já conhecidos para facilitar
-despensa_conhecida = pegar_despensa_dict()
-nomes_conhecidos = sorted(list(despensa_conhecida.keys()))
+despensa = pegar_despensa_dict()
+nomes_conhecidos = sorted(list(despensa.keys()))
 
-aba_criar, aba_ver = st.tabs(["📝 Criar Receita", "📊 Analisar Lucro"])
+aba_criar, aba_editar, aba_ver = st.tabs(["📝 Criar Nova", "✏️ Editar & Apagar", "📊 Margem & Lucro"])
 
 # =========================================
-# ABA 1: CRIADOR DE RECEITAS
+# ABA 1: CRIAR NOVA
 # =========================================
 with aba_criar:
-    st.caption("Adicione os ingredientes. O sistema lembra os preços automaticamente para a próxima vez.")
+    st.caption("Adicione ingredientes. O sistema aprende os preços automaticamente.")
     
     with st.container(border=True):
-        st.subheader("1. Adicionar Ingrediente")
-        
         c1, c2 = st.columns([1, 1])
+        tipo = c1.radio("Modo:", ["Existente", "Novo"], horizontal=True, label_visibility="collapsed", key="tipo_criar")
         
-        # Escolha: Usar algo que já existe ou Criar Novo
-        tipo_entrada = c1.radio("Tipo de Entrada:", ["Escolher Existente", "Criar Novo"], horizontal=True, label_visibility="collapsed")
-        
-        # Lógica para preencher os campos automaticamente
-        if tipo_entrada == "Escolher Existente" and nomes_conhecidos:
-            nome_selecionado = c1.selectbox("Selecione o Ingrediente", nomes_conhecidos)
-            dados = despensa_conhecida[nome_selecionado]
-            
-            # Preenche as variáveis com o que veio do banco
-            val_preco = float(dados['price'])
-            val_tam = float(dados['pkg_amount'])
-            val_unid = dados['unit']
-            nome_final = nome_selecionado
+        if tipo == "Existente" and nomes_conhecidos:
+            sel = c1.selectbox("Item", nomes_conhecidos, key="sel_criar")
+            dados = despensa[sel]
+            v_preco, v_tam, v_unid = float(dados['price']), float(dados['pkg_amount']), dados['unit']
+            nome_f = sel
         else:
-            nome_final = c1.text_input("Nome do Ingrediente", placeholder="Ex: Leite Condensado")
-            val_preco, val_tam, val_unid = 0.0, 0.0, "g"
+            nome_f = c1.text_input("Nome", key="nome_criar")
+            v_preco, v_tam, v_unid = 0.0, 0.0, "g"
 
-        # Os 4 Campos Numéricos
-        col_p, col_t, col_u, col_use = st.columns(4)
-        
-        preco_compra = col_p.number_input("Preço Pago (R$)", value=val_preco, min_value=0.0, step=0.50, format="%.2f")
-        tam_pacote = col_t.number_input("Tamanho do Pacote", value=val_tam, min_value=0.0)
-        unidade = col_u.selectbox("Unidade", ["g", "ml", "unid", "kg", "L"], index=["g", "ml", "unid", "kg", "L"].index(val_unid) if val_unid in ["g", "ml", "unid", "kg", "L"] else 0)
-        qtd_usada = col_use.number_input("Qtd. Usada na Receita", min_value=0.0)
+        cp, ct, cu, cuse = st.columns(4)
+        p = cp.number_input("Preço (R$)", value=v_preco, key="p_criar")
+        t = ct.number_input("Tam. Pacote", value=v_tam, key="t_criar")
+        u = cu.selectbox("Unid.", ["g", "ml", "unid", "kg", "L"], index=["g", "ml", "unid", "kg", "L"].index(v_unid) if v_unid in ["g", "ml", "unid", "kg", "L"] else 0, key="u_criar")
+        qtd = cuse.number_input("Qtd. Usada", key="qtd_criar")
 
-        # Botão Adicionar
-        if st.button("⬇️ Adicionar à Lista", type="primary"):
-            if nome_final and tam_pacote > 0 and qtd_usada > 0:
-                # Matemática
-                custo_unitario = preco_compra / tam_pacote
-                custo_final = custo_unitario * qtd_usada
-                
+        if st.button("Adicionar", key="btn_add_criar"):
+            if nome_f and t > 0:
+                custo_u = p / t
                 st.session_state.ingredientes_temp.append({
-                    "nome": nome_final,
-                    "preco_compra": preco_compra,
-                    "tam_pacote": tam_pacote,
-                    "unidade": unidade,
-                    "qtd_usada": qtd_usada,
-                    "custo_unitario": custo_unitario,
-                    "custo_final": custo_final
+                    "nome": nome_f,
+                    "preco_compra": p,
+                    "tam_pacote": t,
+                    "unidade": u,
+                    "qtd_usada": qtd,
+                    "custo_unitario": custo_u,
+                    "custo_final": custo_u * qtd
                 })
                 st.rerun()
-            else:
-                st.error("Preencha o Tamanho do Pacote e a Quantidade Usada.")
 
-    # --- LISTA ATUAL ---
     if st.session_state.ingredientes_temp:
         st.divider()
-        st.subheader("Ingredientes da Receita Atual")
-        
         df = pd.DataFrame(st.session_state.ingredientes_temp)
+        st.dataframe(df[["nome", "qtd_usada", "unidade", "custo_final"]], use_container_width=True)
         
-        # Mostra a tabela bonita
-        st.dataframe(
-            df[["nome", "qtd_usada", "unidade", "custo_final"]].style.format({"custo_final": "R$ {:.2f}", "qtd_usada": "{:.1f}"}),
-            use_container_width=True
-        )
-        
-        total_atual = df['custo_final'].sum()
-        st.write(f"### Custo Total: R$ {total_atual:,.2f}")
-        
-        # --- FORMULÁRIO DE SALVAR ---
-        with st.form("form_salvar"):
-            st.write("---")
-            st.subheader("2. Finalizar")
-            c_nome, c_autor = st.columns(2)
-            input_receita = c_nome.text_input("Nome da Receita", placeholder="Ex: Bolo de Cenoura")
-            input_autor = c_autor.text_input("Seu Nome", placeholder="Ex: João")
-            
-            if st.form_submit_button("💾 Salvar Receita no Banco de Dados"):
-                if input_receita and input_autor:
-                    salvar_receita(input_receita, input_autor, st.session_state.ingredientes_temp)
-                    st.success(f"Sucesso! Receita '{input_receita}' salva e preços atualizados!")
-                    st.session_state.ingredientes_temp = [] # Limpa a lista
+        with st.form("salvar_nova"):
+            c1, c2 = st.columns(2)
+            n_rec = c1.text_input("Nome Receita")
+            n_aut = c2.text_input("Autor")
+            if st.form_submit_button("💾 Salvar"):
+                if n_rec and n_aut:
+                    salvar_nova_receita(n_rec, n_aut, st.session_state.ingredientes_temp)
+                    st.success("Salvo!")
+                    st.session_state.ingredientes_temp = []
                     st.rerun()
-                else:
-                    st.warning("Preencha o Nome da Receita e Seu Nome.")
         
-        if st.button("🗑️ Limpar Tudo"):
+        if st.button("Limpar Lista", key="limpar_criar"):
             st.session_state.ingredientes_temp = []
             st.rerun()
 
 # =========================================
-# ABA 2: VISUALIZAR E CALCULAR LUCRO
+# ABA 2: EDITAR E APAGAR
+# =========================================
+with aba_editar:
+    st.header("Gerenciar Receitas Existentes")
+    
+    receitas = pegar_todas_receitas_com_id()
+    
+    if receitas:
+        opcoes = [f"{r['name']} ({r['author']})" for r in receitas]
+        escolha = st.selectbox("Selecione para Editar/Apagar", opcoes, key="sel_editar")
+        
+        rec_original = next(r for r in receitas if f"{r['name']} ({r['author']})" == escolha)
+        
+        # Botão para carregar os dados para a memória de edição
+        if st.button("🔄 Carregar Dados", key="btn_load"):
+            st.session_state.buffer_edicao = rec_original['ingredients']
+            st.session_state.edit_id = rec_original['id']
+            st.session_state.edit_nome = rec_original['name']
+            st.session_state.edit_autor = rec_original['author']
+            st.rerun()
+
+        # Área de Edição (Só aparece se tiver carregado)
+        if 'edit_id' in st.session_state and st.session_state.edit_id == rec_original['id']:
+            st.divider()
+            
+            # 1. Editar Metadados
+            c_meta1, c_meta2 = st.columns(2)
+            novo_nome = c_meta1.text_input("Editar Nome", value=st.session_state.edit_nome)
+            novo_autor = c_meta2.text_input("Editar Autor", value=st.session_state.edit_autor)
+            
+            # 2. Tabela Editável
+            st.subheader("Ingredientes")
+            st.caption("Dica: Para remover um item, mude a 'Qtd Usada' para 0.")
+            
+            df_edit = pd.DataFrame(st.session_state.buffer_edicao)
+            
+            # Editor de dados (permite mudar valores na tabela)
+            tabela_editada = st.data_editor(
+                df_edit,
+                column_config={
+                    "qtd_usada": st.column_config.NumberColumn("Qtd Usada", min_value=0.0),
+                    "nome": st.column_config.TextColumn("Ingrediente", disabled=True),
+                    "custo_final": st.column_config.NumberColumn("Custo", disabled=True)
+                },
+                hide_index=True,
+                use_container_width=True,
+                key="editor_tabela"
+            )
+            
+            # 3. Adicionar NOVO item na edição
+            with st.expander("➕ Adicionar Item Extra nessa Receita"):
+                ce1, ce2, ce3, ce4 = st.columns([2,1,1,1])
+                # Usa nomes conhecidos para facilitar
+                add_nome = ce1.selectbox("Item", nomes_conhecidos, key="add_edit_sel") if nomes_conhecidos else ce1.text_input("Nome", key="add_edit_txt")
+                
+                # Pega dados default se existir
+                d_def = despensa.get(add_nome, {})
+                vp = float(d_def.get('price', 0))
+                vt = float(d_def.get('pkg_amount', 0))
+                vu = d_def.get('unit', 'g')
+                
+                add_qtd = ce2.number_input("Qtd", key="add_edit_qtd")
+                # Mostra preço só pra confirmar
+                ce3.caption(f"Ref: R$ {vp:.2f} / {vt:.0f}{vu}")
+                
+                if ce4.button("Incluir", key="btn_incluir_edit"):
+                    if vt > 0:
+                        cu = vp / vt
+                        st.session_state.buffer_edicao.append({
+                            "nome": add_nome,
+                            "preco_compra": vp,
+                            "tam_pacote": vt,
+                            "unidade": vu,
+                            "qtd_usada": add_qtd,
+                            "custo_unitario": cu,
+                            "custo_final": cu * add_qtd
+                        })
+                        st.rerun()
+
+            st.divider()
+            
+            # 4. Botões de Ação (Salvar ou Apagar)
+            col_save, col_del = st.columns([3, 1])
+            
+            if col_save.button("💾 Salvar Alterações", type="primary", key="btn_save_edit"):
+                # Recalcula custos baseado na tabela editada
+                ingredientes_finais = []
+                for index, row in tabela_editada.iterrows():
+                    if row['qtd_usada'] > 0: # Remove itens zerados
+                        custo_novo = row['custo_unitario'] * row['qtd_usada']
+                        ingredientes_finais.append({
+                            "nome": row['nome'],
+                            "preco_compra": row['preco_compra'],
+                            "tam_pacote": row['tam_pacote'],
+                            "unidade": row['unidade'],
+                            "qtd_usada": row['qtd_usada'],
+                            "custo_unitario": row['custo_unitario'],
+                            "custo_final": custo_novo
+                        })
+                
+                atualizar_receita_existente(st.session_state.edit_id, novo_nome, novo_autor, ingredientes_finais)
+                st.success("Receita Atualizada!")
+                
+            if col_del.button("🗑️ APAGAR RECEITA", type="secondary", key="btn_del"):
+                apagar_receita(st.session_state.edit_id)
+                st.error(f"Receita '{st.session_state.edit_nome}' foi apagada.")
+                # Limpa a memória
+                del st.session_state['edit_id']
+                st.rerun()
+
+# =========================================
+# ABA 3: LUCRO
 # =========================================
 with aba_ver:
-    st.header("Biblioteca de Receitas")
+    st.header("Análise Financeira")
+    lista_r = pegar_todas_receitas_com_id()
     
-    todas_receitas = pegar_todas_receitas()
-    
-    if todas_receitas:
-        opcoes = [f"{r['name']} (por {r['author']})" for r in todas_receitas]
-        escolha = st.selectbox("Escolha uma Receita", opcoes)
+    if lista_r:
+        sel_v = st.selectbox("Receita", [r['name'] for r in lista_r], key="sel_ver")
+        dados = next(r for r in lista_r if r['name'] == sel_v)
         
-        dados_rec = next(r for r in todas_receitas if f"{r['name']} (por {r['author']})" == escolha)
+        st.dataframe(pd.DataFrame(dados['ingredients'])[["nome", "qtd_usada", "custo_final"]], use_container_width=True)
         
-        # Tabela Detalhada
-        df_ver = pd.DataFrame(dados_rec['ingredients'])
-        st.dataframe(
-            df_ver[["nome", "preco_compra", "tam_pacote", "qtd_usada", "custo_final"]].style.format({
-                "preco_compra": "R$ {:.2f}",
-                "custo_final": "R$ {:.2f}",
-                "tam_pacote": "{:.0f}",
-                "qtd_usada": "{:.0f}"
-            }),
-            use_container_width=True
-        )
+        custo = dados['total_cost']
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Custo Total", f"R$ {custo:.2f}")
         
-        st.divider()
-        
-        # Calculadora de Margem
-        custo = dados_rec['total_cost']
-        
-        c_math1, c_math2, c_math3 = st.columns(3)
-        c_math1.metric("Custo de Produção", f"R$ {custo:.2f}")
-        
-        preco_venda = c_math2.number_input("Preço de Venda Sugerido (R$)", value=custo * 3.0, step=1.0)
-        
-        if preco_venda > 0:
-            lucro = preco_venda - custo
-            margem = (lucro / preco_venda) * 100
-            
-            c_math3.metric("Margem de Lucro", f"{margem:.1f}%", delta=f"R$ {lucro:.2f}")
-            
-            if margem < 30:
-                st.warning("⚠️ Margem Baixa (Menor que 30%)")
-            elif margem > 50:
-                st.success("🚀 Margem Excelente (Maior que 50%)")
-            else:
-                st.info("✅ Margem Saudável")
-    else:
-        st.info("Nenhuma receita salva ainda.")
+        pv = c2.number_input("Preço Venda", value=custo*3, key="pv_ver")
+        if pv > 0:
+            lucro = pv - custo
+            margem = (lucro / pv) * 100
+            c3.metric("Margem", f"{margem:.1f}%", delta=f"R$ {lucro:.2f}")
