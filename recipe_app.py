@@ -14,7 +14,7 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# CSS Customizado (Botões redondos e fontes bonitas)
+# CSS Customizado
 st.markdown("""
     <style>
     .stButton>button { border-radius: 20px; font-weight: bold; width: 100%; }
@@ -94,7 +94,10 @@ def confirmar_producao(fila_producao):
             item_est = next((e for e in estoque if e['nome'] == nome), None)
             if item_est:
                 safe_id = f"{item_est['nome']}_generico".replace(" ", "_").lower()
-                novo_saldo = max(0, item_est.get('estoque_atual', 0) - necessario)
+                # CORREÇÃO AQUI: .get('estoque_atual', 0) para evitar erro
+                atual = item_est.get('estoque_atual', 0)
+                novo_saldo = max(0, atual - necessario)
+                
                 db.collection("inventory").document(safe_id).update({"estoque_atual": novo_saldo})
                 item_est['estoque_atual'] = novo_saldo
                 
@@ -209,7 +212,7 @@ with aba_criar:
                         apagar_receita(sel_d['id']); st.rerun()
 
 # ==================================================
-# ABA 2: EVENTOS (CORES NOVAS AQUI!)
+# ABA 2: EVENTOS
 # ==================================================
 with aba_evento:
     st.caption("Planejador Financeiro de Eventos")
@@ -253,20 +256,16 @@ with aba_evento:
             col_c, col_f, col_l = st.columns(3)
             
             with col_c:
-                # Vermelho Claro (Custo)
                 cartao_financeiro("Custo Total", custo_tot, "#FFEBEE", "#D32F2F", "🔴")
             
             with col_f:
-                # Azul Claro (Faturamento)
                 cartao_financeiro("Faturamento", venda_tot, "#E3F2FD", "#1976D2", "🔵")
                 
             with col_l:
-                # Verde (Lucro) ou Laranja (Prejuízo)
                 cor_bg = "#E8F5E9" if lucro >= 0 else "#FFEBEE"
                 cor_tx = "#388E3C" if lucro >= 0 else "#D32F2F"
                 cartao_financeiro("Lucro Líquido", lucro, cor_bg, cor_tx, "🤑")
 
-            # Barra de progresso da margem
             st.caption(f"Margem de Lucro: {margem:.1f}%")
             if margem > 0:
                 st.progress(min(int(margem), 100))
@@ -289,7 +288,9 @@ with aba_evento:
             
             for nome, qtd in lista_nec.items():
                 e_item = next((e for e in estoque if e['nome'] == nome), None)
-                tem = e_item['estoque_atual'] if e_item else 0
+                # CORREÇÃO CRÍTICA AQUI: .get('estoque_atual', 0)
+                tem = e_item.get('estoque_atual', 0) if e_item else 0
+                
                 falta = max(0, qtd - tem)
                 status = "✅ Ok" if falta == 0 else f"❌ Falta {falta:.0f}"
                 tab_compra.append({"Item": nome, "Preciso": qtd, "Tenho": tem, "Status": status})
@@ -324,10 +325,11 @@ with aba_despensa:
         if st.button("Salvar") and ni:
             sid = f"{ni}_generico".replace(" ", "_").lower()
             db.collection("inventory").document(sid).set({"nome": ni, "estoque_atual": qi}, merge=True)
-            st.success("Ok!"); st.rerun()
+            st.success("Salvo!"); st.rerun()
             
     items = pegar_estoque()
     if items:
+        # Usa .get() para evitar erro se o campo não existir
         validos = [i for i in items if i.get('estoque_atual', 0) > 0]
         if validos:
             st.dataframe(pd.DataFrame(validos)[['nome', 'estoque_atual']], use_container_width=True)
@@ -344,8 +346,8 @@ with aba_diario:
         d = l.to_dict()
         dt = d['data'].strftime("%d/%m %H:%M") if d.get('data') else "-"
         lucro_hist = d.get('faturamento',0) - d.get('custo_total',0)
-        cor = "green" if lucro_hist >= 0 else "red"
         
         with st.expander(f"{dt} | Lucro: R$ {lucro_hist:.2f}"):
-            st.write(d.get('resumo'))
+            st.write(d.get('resumo', []))
             st.markdown(f"**Venda:** R$ {d.get('faturamento',0):.2f} | **Custo:** R$ {d.get('custo_total',0):.2f}")
+
