@@ -20,6 +20,8 @@ st.markdown("""
     .stButton>button { border-radius: 20px; font-weight: bold; width: 100%; }
     .stDataFrame { border-radius: 10px; }
     h1 { color: #ff4b4b; }
+    /* Destaque para inputs de dinheiro */
+    div[data-testid="stNumberInput"] input { font-weight: bold; color: #333; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -70,7 +72,7 @@ def salvar_receita(nome, autor, ingredientes, doc_id=None):
         "updated_at": firestore.SERVER_TIMESTAMP
     }, merge=True)
     
-    # Atualiza referência de preço na despensa
+    # Salva referências na despensa
     for item in ingredientes:
         safe_id = f"{item['nome']}_generico".replace(" ", "_").lower()
         db.collection("inventory").document(safe_id).set({
@@ -94,7 +96,6 @@ def confirmar_producao(fila_producao):
             item_est = next((e for e in estoque if e['nome'] == nome), None)
             if item_est:
                 safe_id = f"{item_est['nome']}_generico".replace(" ", "_").lower()
-                # CORREÇÃO AQUI: .get('estoque_atual', 0) para evitar erro
                 atual = item_est.get('estoque_atual', 0)
                 novo_saldo = max(0, atual - necessario)
                 
@@ -154,25 +155,34 @@ aba_criar, aba_evento, aba_despensa, aba_diario = st.tabs([
 ])
 
 # ==================================================
-# ABA 1: CRIAR RECEITA
+# ABA 1: CRIAR RECEITA (COM CUSTO PROPORCIONAL)
 # ==================================================
 with aba_criar:
-    st.caption("Monte sua receita passo a passo.")
+    st.caption("Defina o custo proporcional: Preço do Pacote ÷ Tamanho do Pacote × Uso.")
     
     col_input, col_preview = st.columns([1, 1.2])
     
     with col_input:
         with st.container(border=True):
             st.subheader("Novo Ingrediente")
-            nome = st.text_input("Nome (ex: Leite)")
+            nome = st.text_input("Nome (ex: Farinha)", placeholder="Digite o nome...")
             
+            st.write("---")
+            st.markdown("**1. Dados da Compra (Pacote Fechado)**")
             c1, c2 = st.columns(2)
-            p_compra = c1.number_input("Preço Pago (R$)", 0.0, format="%.2f")
-            t_pacote = c2.number_input("Tamanho Pacote", 0.0)
+            # Rótulos explícitos para garantir que é o pacote inteiro
+            p_compra = c1.number_input("Preço do Pacote (R$)", 0.0, format="%.2f", help="Quanto você pagou no mercado pelo pacote inteiro?")
+            t_pacote = c2.number_input("Tamanho do Pacote", 0.0, help="Qual o peso total na embalagem? (ex: 1000g)")
             
+            st.markdown("**2. Dados da Receita (Uso)**")
             c3, c4 = st.columns(2)
             unid = c3.selectbox("Unid.", ["g", "ml", "unid", "kg", "L"])
-            uso = c4.number_input("Qtd Usada", 0.0)
+            uso = c4.number_input("Quanto vai na receita?", 0.0)
+            
+            # Cálculo Prévio para Visualização
+            if t_pacote > 0 and uso > 0:
+                custo_previsto = (p_compra / t_pacote) * uso
+                st.info(f"💰 Custo Proporcional: **R$ {custo_previsto:.2f}** (por usar {uso}{unid})")
             
             if st.button("⬇️ Adicionar Item"):
                 if t_pacote > 0:
@@ -181,6 +191,8 @@ with aba_criar:
                         "nome": nome, "preco_compra": p_compra, "tam_pacote": t_pacote,
                         "unidade": unid, "qtd_usada": uso, "custo_final": custo
                     })
+                else:
+                    st.error("O tamanho do pacote não pode ser zero!")
     
     with col_preview:
         st.subheader("Rascunho")
@@ -202,7 +214,6 @@ with aba_criar:
             if st.button("Limpar"):
                 st.session_state.carrinho = []; st.rerun()
         else:
-            # Lista receitas salvas para apagar
             with st.expander("Ver receitas salvas"):
                 rec_list = pegar_receitas()
                 if rec_list:
@@ -229,7 +240,6 @@ with aba_evento:
                 
                 qtd_evt = st.number_input("Quantidade", 1, 5000, 10)
                 
-                # Sugestão de preço
                 custo_base = d_rec['total_cost']
                 venda_evt = st.number_input("Preço Venda (Unit)", value=custo_base*3.0, format="%.2f")
                 
@@ -252,29 +262,20 @@ with aba_evento:
             lucro = venda_tot - custo_tot
             margem = (lucro/venda_tot)*100 if venda_tot > 0 else 0
             
-            # --- CARTÕES COLORIDOS ---
             col_c, col_f, col_l = st.columns(3)
-            
-            with col_c:
-                cartao_financeiro("Custo Total", custo_tot, "#FFEBEE", "#D32F2F", "🔴")
-            
-            with col_f:
-                cartao_financeiro("Faturamento", venda_tot, "#E3F2FD", "#1976D2", "🔵")
-                
+            with col_c: cartao_financeiro("Custo Total", custo_tot, "#FFEBEE", "#D32F2F", "🔴")
+            with col_f: cartao_financeiro("Faturamento", venda_tot, "#E3F2FD", "#1976D2", "🔵")
             with col_l:
                 cor_bg = "#E8F5E9" if lucro >= 0 else "#FFEBEE"
                 cor_tx = "#388E3C" if lucro >= 0 else "#D32F2F"
                 cartao_financeiro("Lucro Líquido", lucro, cor_bg, cor_tx, "🤑")
 
             st.caption(f"Margem de Lucro: {margem:.1f}%")
-            if margem > 0:
-                st.progress(min(int(margem), 100))
-            else:
-                st.warning("Prejuízo estimado!")
+            if margem > 0: st.progress(min(int(margem), 100))
+            else: st.warning("Prejuízo estimado!")
 
             st.divider()
             
-            # Lista de Compras
             st.subheader("🛒 Lista de Compras")
             lista_nec = {}
             for item in st.session_state.fila_eventos:
@@ -288,9 +289,7 @@ with aba_evento:
             
             for nome, qtd in lista_nec.items():
                 e_item = next((e for e in estoque if e['nome'] == nome), None)
-                # CORREÇÃO CRÍTICA AQUI: .get('estoque_atual', 0)
                 tem = e_item.get('estoque_atual', 0) if e_item else 0
-                
                 falta = max(0, qtd - tem)
                 status = "✅ Ok" if falta == 0 else f"❌ Falta {falta:.0f}"
                 tab_compra.append({"Item": nome, "Preciso": qtd, "Tenho": tem, "Status": status})
@@ -298,7 +297,6 @@ with aba_evento:
             
             st.dataframe(pd.DataFrame(tab_compra), use_container_width=True, hide_index=True)
             
-            # Botão Produzir
             txt_btn = "🚀 Confirmar Produção (Baixar Estoque)" if tudo_ok else "⚠️ Produzir com Falta de Itens"
             type_btn = "primary" if tudo_ok else "secondary"
             
@@ -329,7 +327,6 @@ with aba_despensa:
             
     items = pegar_estoque()
     if items:
-        # Usa .get() para evitar erro se o campo não existir
         validos = [i for i in items if i.get('estoque_atual', 0) > 0]
         if validos:
             st.dataframe(pd.DataFrame(validos)[['nome', 'estoque_atual']], use_container_width=True)
@@ -350,4 +347,3 @@ with aba_diario:
         with st.expander(f"{dt} | Lucro: R$ {lucro_hist:.2f}"):
             st.write(d.get('resumo', []))
             st.markdown(f"**Venda:** R$ {d.get('faturamento',0):.2f} | **Custo:** R$ {d.get('custo_total',0):.2f}")
-
