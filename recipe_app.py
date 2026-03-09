@@ -4,7 +4,7 @@ import firebase_admin
 from firebase_admin import credentials
 from firebase_admin import firestore
 import json
-import math # <-- Importante para calcular pacotes inteiros
+import math
 
 # --- 1. CONFIGURAÇÃO VISUAL ---
 st.set_page_config(
@@ -14,13 +14,12 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# CSS Customizado
+# CSS Customizado - Atualizado para suportar Dark Mode nativamente
 st.markdown("""
     <style>
-    .stButton>button { border-radius: 20px; font-weight: bold; width: 100%; }
+    .stButton>button { border-radius: 10px; font-weight: bold; width: 100%; }
     .stDataFrame { border-radius: 10px; }
     h1 { color: #ff4b4b; }
-    div[data-testid="stNumberInput"] input { font-weight: bold; color: #333; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -68,13 +67,14 @@ def salvar_receita(nome, autor, ingredientes):
 def apagar_receita(doc_id):
     db.collection("recipes").document(doc_id).delete()
 
-# --- 4. FUNÇÃO VISUAL (CARTÕES COLORIDOS) ---
-def cartao_financeiro(titulo, valor, cor_fundo, cor_texto, icone, subtitulo=""):
+# --- 4. FUNÇÃO VISUAL (CARTÕES ADAPTATIVOS AO DARK MODE) ---
+def cartao_financeiro(titulo, valor, cor_borda, icone, subtitulo=""):
+    # Usando CSS variables nativas do Streamlit para texto e fundo
     st.markdown(f"""
-    <div style="background-color: {cor_fundo}; padding: 15px; border-radius: 15px; border-left: 5px solid {cor_texto}; margin-bottom: 10px;">
-        <p style="color: {cor_texto}; font-size: 14px; margin: 0; font-weight: bold;">{icone} {titulo}</p>
-        <p style="color: #333; font-size: 24px; margin: 0; font-weight: bold;">R$ {valor:,.2f}</p>
-        <p style="color: #666; font-size: 12px; margin: 0;">{subtitulo}</p>
+    <div style="background-color: var(--secondary-background-color); padding: 15px; border-radius: 10px; border-left: 5px solid {cor_borda}; margin-bottom: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+        <p style="color: var(--text-color); font-size: 14px; margin: 0; font-weight: bold; opacity: 0.8;">{icone} {titulo}</p>
+        <p style="color: var(--text-color); font-size: 24px; margin: 5px 0 0 0; font-weight: bold;">R$ {valor:,.2f}</p>
+        <p style="color: var(--text-color); font-size: 12px; margin: 0; opacity: 0.6;">{subtitulo}</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -88,9 +88,6 @@ with st.sidebar:
     if st.text_input("Senha", type="password") != st.secrets.get("senha_app", "admin"):
         st.warning("🔒 Digite a senha para acessar."); st.stop()
 
-# ESTADO
-if 'carrinho' not in st.session_state: st.session_state.carrinho = []
-
 # ABAS PRINCIPAIS
 aba_criar, aba_listar, aba_calculadora = st.tabs([
     "📝 Nova Receita", 
@@ -99,66 +96,78 @@ aba_criar, aba_listar, aba_calculadora = st.tabs([
 ])
 
 # ==================================================
-# ABA 1: CRIAR RECEITA
+# ABA 1: CRIAR RECEITA (TABELA DINÂMICA)
 # ==================================================
 with aba_criar:
-    st.caption("Crie a ficha técnica de 1 unidade/lote base da sua receita.")
+    st.caption("Monte sua receita. Adicione linhas à tabela abaixo para incluir novos ingredientes.")
     
-    col_input, col_preview = st.columns([1, 1.2])
-    
-    with col_input:
-        with st.container(border=True):
-            st.subheader("Adicionar Ingrediente")
-            nome_ing = st.text_input("Nome do Ingrediente", placeholder="ex: Farinha de Trigo")
-            
-            c1, c2 = st.columns(2)
-            p_compra = c1.number_input("Preço do Pacote Fechado (R$)", 0.0, format="%.2f")
-            t_pacote = c2.number_input("Tamanho do Pacote", 0.0, help="ex: 1000 se for 1kg e você for usar em gramas.")
-            
-            c3, c4 = st.columns(2)
-            unid = c3.selectbox("Medida", ["g", "ml", "unid"])
-            uso = c4.number_input("Quanto vai na receita?", 0.0)
-            
-            if t_pacote > 0 and uso > 0:
-                custo_previsto = (p_compra / t_pacote) * uso
-                st.info(f"💰 Custo Proporcional na receita: **R$ {custo_previsto:.2f}**")
-            
-            if st.button("⬇️ Adicionar Item"):
-                if t_pacote > 0 and uso > 0 and nome_ing:
-                    custo = (p_compra / t_pacote) * uso
-                    st.session_state.carrinho.append({
-                        "nome": nome_ing, "preco_compra": p_compra, "tam_pacote": t_pacote,
-                        "unidade": unid, "qtd_usada": uso, "custo_final": custo
-                    })
-                    st.rerun()
-                else:
-                    st.error("Preencha todos os campos e certifique-se que o tamanho do pacote não é zero.")
+    col_info, col_vazia = st.columns([2, 1])
+    with col_info:
+        nome_receita = st.text_input("Nome da Receita (ex: Bolo de Cenoura)")
+        autor_receita = st.text_input("Criador/Chef", value="Chef")
 
-    with col_preview:
-        st.subheader("Ficha Técnica Atual")
-        if st.session_state.carrinho:
-            df = pd.DataFrame(st.session_state.carrinho)
-            st.dataframe(df[["nome", "qtd_usada", "unidade", "custo_final"]], use_container_width=True, hide_index=True)
+    st.markdown("### 🛒 Ingredientes da Receita")
+    
+    # Criando o DataFrame vazio base para o Editor
+    if 'df_ingredientes' not in st.session_state:
+        st.session_state.df_ingredientes = pd.DataFrame(
+            columns=["Ingrediente", "Preco_Pacote", "Tam_Pacote", "Medida", "Qtd_Usada"]
+        )
+
+    # Editor de dados do Streamlit (Permite adicionar/remover linhas livremente)
+    edited_df = st.data_editor(
+        st.session_state.df_ingredientes,
+        num_rows="dynamic", # Essa configuração é a mágica que permite adicionar linhas
+        column_config={
+            "Ingrediente": st.column_config.TextColumn("Nome do Ingrediente", required=True),
+            "Preco_Pacote": st.column_config.NumberColumn("Preço do Pacote (R$)", min_value=0.01, format="%.2f"),
+            "Tam_Pacote": st.column_config.NumberColumn("Tamanho Pacote", min_value=0.01),
+            "Medida": st.column_config.SelectboxColumn("Medida", options=["g", "ml", "unid", "kg", "L"]),
+            "Qtd_Usada": st.column_config.NumberColumn("Qtd Usada na Receita", min_value=0.01)
+        },
+        use_container_width=True,
+        hide_index=True
+    )
+
+    # Cálculo dinâmico do custo enquanto preenche a tabela
+    custo_total_estimado = 0
+    ingredientes_processados = []
+    
+    # Filtrar apenas as linhas onde todos os dados foram preenchidos
+    linhas_validas = edited_df.dropna(how='any')
+    
+    for _, row in linhas_validas.iterrows():
+        if row['Tam_Pacote'] > 0:
+            custo_linha = (row['Preco_Pacote'] / row['Tam_Pacote']) * row['Qtd_Usada']
+            custo_total_estimado += custo_linha
             
-            custo_total = df['custo_final'].sum()
-            cartao_financeiro("Custo Base da Receita", custo_total, "#FFF3E0", "#FF9800", "🏷️", "Base para precificação.")
-            
-            with st.form("save_recipe"):
-                n_rec = st.text_input("Nome da Receita (ex: Bolo de Cenoura Inteiro)")
-                n_aut = st.text_input("Criador/Chef")
-                if st.form_submit_button("💾 Salvar Receita no Banco"):
-                    if n_rec:
-                        salvar_receita(n_rec, n_aut, st.session_state.carrinho)
-                        st.balloons()
-                        st.session_state.carrinho = []
-                        st.rerun()
-                    else:
-                        st.error("Dê um nome para a receita antes de salvar.")
-            
-            if st.button("🗑️ Limpar Rascunho"):
-                st.session_state.carrinho = []; st.rerun()
+            # Prepara o formato para salvar no banco depois
+            ingredientes_processados.append({
+                "nome": row['Ingrediente'],
+                "preco_compra": row['Preco_Pacote'],
+                "tam_pacote": row['Tam_Pacote'],
+                "unidade": row['Medida'],
+                "qtd_usada": row['Qtd_Usada'],
+                "custo_final": custo_linha
+            })
+
+    # Mostrar o custo atualizado em tempo real
+    if custo_total_estimado > 0:
+        st.info(f"💰 Custo Base Atual da Receita: **R$ {custo_total_estimado:.2f}**")
+
+    # Botão de salvar
+    if st.button("💾 Salvar Receita no Banco", type="primary"):
+        if not nome_receita:
+            st.error("⚠️ Dê um nome para a receita antes de salvar.")
+        elif not ingredientes_processados:
+            st.error("⚠️ Preencha os ingredientes corretamente antes de salvar.")
         else:
-            st.info("A ficha técnica está vazia. Adicione ingredientes ao lado.")
+            salvar_receita(nome_receita, autor_receita, ingredientes_processados)
+            st.balloons()
+            st.success(f"Receita '{nome_receita}' salva com sucesso!")
+            # Reseta a tabela
+            st.session_state.df_ingredientes = pd.DataFrame(columns=["Ingrediente", "Preco_Pacote", "Tam_Pacote", "Medida", "Qtd_Usada"])
+            st.rerun()
 
 # ==================================================
 # ABA 2: MINHAS RECEITAS
@@ -185,7 +194,7 @@ with aba_listar:
 # ==================================================
 with aba_calculadora:
     st.subheader("⚖️ Planejamento de Produção & Compras")
-    st.caption("Descubra o custo de fabricação e quanto dinheiro você precisa para ir ao mercado comprar as embalagens fechadas.")
+    st.caption("Descubra o custo de fabricação e quanto dinheiro precisa para comprar as embalagens fechadas no mercado.")
     
     receitas_calc = pegar_receitas()
     
@@ -198,23 +207,20 @@ with aba_calculadora:
         
         st.divider()
         
-        # Variáveis para somar os totais
-        custo_proporcional_total = 0 # O custo exato das gramas usadas (para precificar)
-        desembolso_mercado_total = 0 # O dinheiro que você deixa no caixa do mercado (pacotes inteiros)
-        
+        custo_proporcional_total = 0 
+        desembolso_mercado_total = 0 
         lista_compras = []
         
         for ing in dados_rec['ingredients']:
-            # 1. Necessidade exata na receita
+            # 1. Necessidade exata
             qtd_total_necessaria = ing['qtd_usada'] * multiplicador
             custo_prop_ing = ing['custo_final'] * multiplicador
             custo_proporcional_total += custo_prop_ing
             
-            # 2. Lógica de Mercado (Pacotes Inteiros)
+            # 2. Lógica de Mercado
             tam_pacote = ing['tam_pacote']
             preco_pacote = ing['preco_compra']
             
-            # math.ceil arredonda para cima. Ex: 1100g necessárias / 1000g o pacote = 1.1 -> compra 2 pacotes.
             pacotes_necessarios = math.ceil(qtd_total_necessaria / tam_pacote)
             custo_mercado_ing = pacotes_necessarios * preco_pacote
             desembolso_mercado_total += custo_mercado_ing
@@ -227,21 +233,19 @@ with aba_calculadora:
                 "Desembolso Caixa": f"R$ {custo_mercado_ing:.2f}"
             })
 
-        # Exibindo os Cards Financeiros
+        # Exibindo os Cards Financeiros (Agora adaptados para Dark Mode)
         col_res1, col_res2, col_res3 = st.columns(3)
         with col_res1:
-            # O custo que você usa para descobrir se a empresa dá lucro
-            cartao_financeiro("Custo Proporcional", custo_proporcional_total, "#FFF3E0", "#FF9800", "⚖️", "Custo real das gramas usadas.")
+            cartao_financeiro("Custo Proporcional", custo_proporcional_total, "#FF9800", "⚖️", "Custo real das gramas usadas.")
         with col_res2:
-            # O custo que dói no bolso no dia da compra
-            cartao_financeiro("Desembolso no Mercado", desembolso_mercado_total, "#FFEBEE", "#D32F2F", "🛒", "Valor pago nas embalagens fechadas.")
+            cartao_financeiro("Desembolso no Mercado", desembolso_mercado_total, "#F44336", "🛒", "Valor em embalagens fechadas.")
         with col_res3:
-            sugestao_venda = custo_proporcional_total * 3 # Markup baseado no custo proporcional
-            cartao_financeiro("Sugestão de Venda Total", sugestao_venda, "#E8F5E9", "#388E3C", "🤑", "Markup 3x sobre Custo Proporcional.")
+            sugestao_venda = custo_proporcional_total * 3
+            cartao_financeiro("Sugestão de Venda", sugestao_venda, "#4CAF50", "🤑", "Markup 3x sobre o Proporcional.")
         
-        # Exibindo a Tabela de Compras
         st.markdown("### 📝 Lista de Compras Exata")
         st.dataframe(pd.DataFrame(lista_compras), use_container_width=True, hide_index=True)
         
     else:
         st.warning("Crie e salve uma receita na primeira aba para usar a calculadora.")
+
