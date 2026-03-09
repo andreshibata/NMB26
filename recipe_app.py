@@ -145,7 +145,7 @@ with aba_criar:
     with col_info2:
         autor_receita = st.text_input("Criador/Chef", value=st.session_state.rec_autor_edicao)
     with col_info3:
-        rendimento_receita = st.number_input("Rende quantas porções? (Ex: 12 fatias)", min_value=0.1, value=float(st.session_state.rec_rendimento_edicao), step=1.0)
+        rendimento_receita = st.number_input("Rende quantas PORÇÕES?", min_value=0.1, value=float(st.session_state.rec_rendimento_edicao), step=1.0)
 
     st.markdown("### 🛒 Ingredientes e Sub-receitas")
     
@@ -161,7 +161,7 @@ with aba_criar:
                     "Tipo": "Sub-receita",
                     "Nome": rec_sub_dados['name'],
                     "Preco_Pacote": rec_sub_dados['total_cost'], 
-                    "Tam_Pacote": rendimento_sub, 
+                    "Tam_Pacote": rendimento_sub, # O tamanho do "pacote" da sub-receita é o total de porções que ela rende
                     "Medida": "porções",
                     "Qtd_Usada": qtd_sub 
                 }])
@@ -170,7 +170,7 @@ with aba_criar:
         else:
             st.warning("Ainda não tem outras receitas para utilizar como sub-receita.")
 
-    st.caption("Edite os valores abaixo. Note que o 'Preço do Pacote' aceita o valor **0** em caso de patrocínio.")
+    st.caption("Edite os valores abaixo. Note que o 'Preço do Pacote' aceita o valor **0** em caso de patrocínio ou ingredientes doados.")
     
     edited_df = st.data_editor(
         st.session_state.df_ingredientes,
@@ -209,7 +209,7 @@ with aba_criar:
 
     if custo_total_estimado >= 0:
         custo_por_porcao_estimado = custo_total_estimado / rendimento_receita if rendimento_receita > 0 else 0
-        st.info(f"💰 Custo Total da Fornada: **R$ {custo_total_estimado:.2f}** | 🍽️ Custo Exato de 1 Porção: **R$ {custo_por_porcao_estimado:.2f}**")
+        st.info(f"💰 Custo da Fornada Inteira: **R$ {custo_total_estimado:.2f}** | 🍽️ Custo exato de **1 Porção: R$ {custo_por_porcao_estimado:.2f}**")
 
     c_save, c_clear = st.columns([1, 4])
     if c_save.button("💾 Guardar Receita", type="primary"):
@@ -243,7 +243,7 @@ with aba_listar:
             rend_salvo = rec.get('rendimento', 1.0)
             custo_por_porcao = rec['total_cost'] / rend_salvo if rend_salvo > 0 else 0
             
-            with st.expander(f"🍽️ {rec['name']} - Rende {rend_salvo} porções | Custo Total: R$ {rec['total_cost']:.2f} | 1 Porção: R$ {custo_por_porcao:.2f}"):
+            with st.expander(f"🍽️ {rec['name']} - Rende {rend_salvo} porções | Custo da Porção: R$ {custo_por_porcao:.2f} | Total: R$ {rec['total_cost']:.2f}"):
                 st.caption(f"Autor: {rec.get('author', 'Desconhecido')}")
                 df_ing = pd.DataFrame(rec['ingredients'])
                 
@@ -267,9 +267,9 @@ with aba_calculadora:
     col_markup, col_vazia2 = st.columns([1, 2])
     with col_markup:
         markup_padrao = st.number_input(
-            "📈 Markup Inicial Sugerido", 
+            "📈 Markup Sugerido (Ponto de Partida)", 
             min_value=1.0, value=3.0, step=0.1, 
-            help="Define o preço de venda de 1 porção ao adicionar ao carrinho. Depois pode editar cada um individualmente."
+            help="Define o preço base ao adicionar uma receita à fila. Depois você pode editar o preço/markup individual de cada uma."
         )
     
     st.divider()
@@ -279,13 +279,13 @@ with aba_calculadora:
             c_sel, c_qtd, c_btn = st.columns([2, 1, 1])
             r_escolhida = c_sel.selectbox("Escolha a Receita", list(dict_receitas.keys()))
             dados_rec = dict_receitas.get(r_escolhida)
-            multiplicador = c_qtd.number_input("Fornadas (Múltiplos da Receita Inteira)", min_value=1.0, value=1.0, step=1.0)
+            multiplicador = c_qtd.number_input("Quantas FORNADAS/LOTES vai fazer?", min_value=1.0, value=1.0, step=1.0)
             
             if c_btn.button("➕ Adicionar à Fila"):
                 st.session_state.fila_producao.append({
                     "receita": dados_rec,
                     "qtd": multiplicador,
-                    "preco_venda_porcao": None # Deixa vazio para ser calculado no primeiro loop
+                    "preco_venda_porcao": None # Fica vazio para aplicar o markup sugerido na primeira vez
                 })
                 st.rerun()
 
@@ -297,6 +297,7 @@ with aba_calculadora:
                     if ing.get('tipo', 'Ingrediente') == 'Sub-receita':
                         sub_rec_dados = dict_receitas.get(ing['nome'])
                         if sub_rec_dados:
+                            # A matemática exata de proporção de sub-receitas baseada no rendimento
                             mult_sub = (ing['qtd_usada'] / ing['tam_pacote']) * mult_atual
                             ingredientes_finais.extend(extrair_ingredientes_base(sub_rec_dados, mult_sub))
                     else:
@@ -307,35 +308,35 @@ with aba_calculadora:
                 return ingredientes_finais
 
             # ==========================================
-            # ANÁLISE INDIVIDUAL (FOCO EM 1 PORÇÃO)
+            # ANÁLISE E PRECIFICAÇÃO INDIVIDUAL DA PORÇÃO
             # ==========================================
-            st.markdown("### 🔍 Precificação e Margens Individuais (Por Porção)")
-            st.caption("Dê dois cliques na coluna **'✏️ Preço Venda (1 Porção)'** para definir quanto o seu cliente vai pagar por unidade/fatia.")
+            st.markdown("### 🔍 Precificação Individual por Porção")
+            st.caption("Dê dois cliques na coluna **'✏️ Preço Venda (1 Porção)'** para definir o preço exato que o seu cliente vai pagar. O Markup Atual e o Lucro vão recalcular automaticamente.")
             
             tabela_por_receita = []
             
             for index, item in enumerate(st.session_state.fila_producao):
-                # 1. Calcula o custo da Fornada Inteira
+                # Extrai ingredientes e custo da fornada total programada
                 ing_puros_item = extrair_ingredientes_base(item['receita'], item['qtd'])
-                custo_total_da_fornada = sum(i['custo_final'] for i in ing_puros_item)
+                custo_total_fornada_produzida = sum(i['custo_final'] for i in ing_puros_item)
                 
-                # 2. Descobre quantas porções isso vai gerar no total
+                # Projeta o total de porções que essa produção vai gerar
                 rendimento_base = item['receita'].get('rendimento', 1.0)
                 porcoes_totais_produzidas = item['qtd'] * rendimento_base
                 
-                # 3. Matemática Exata: Custo de 1 única porção
-                custo_de_uma_porcao = custo_total_da_fornada / porcoes_totais_produzidas if porcoes_totais_produzidas > 0 else 0
+                # Custo exato de 1 Porção
+                custo_de_uma_porcao = custo_total_fornada_produzida / porcoes_totais_produzidas if porcoes_totais_produzidas > 0 else 0
                 
-                # 4. Define o preço de venda da porção (Padrão vs Editado)
+                # Preço da porção (Sugerido vs Editado)
                 if item.get('preco_venda_porcao') is None:
                     item['preco_venda_porcao'] = custo_de_uma_porcao * markup_padrao
                 
                 venda_de_uma_porcao = item['preco_venda_porcao']
                 
-                # 5. Projeções globais baseadas no preço dessa 1 porção
+                # Métricas com base na edição do usuário
                 faturamento_total_desta_receita = venda_de_uma_porcao * porcoes_totais_produzidas
                 markup_real = venda_de_uma_porcao / custo_de_uma_porcao if custo_de_uma_porcao > 0 else 0
-                lucro_total_projetado = faturamento_total_desta_receita - custo_total_da_fornada
+                lucro_total_projetado = faturamento_total_desta_receita - custo_total_fornada_produzida
                 
                 tabela_por_receita.append({
                     "Produto": item['receita']['name'],
@@ -343,13 +344,13 @@ with aba_calculadora:
                     "Rende (Porções)": porcoes_totais_produzidas,
                     "Custo (1 Porção)": float(custo_de_uma_porcao),
                     "✏️ Preço Venda (1 Porção)": float(venda_de_uma_porcao),
-                    "Markup Real": f"{markup_real:.2f}x",
-                    "Lucro Projetado Total": float(lucro_total_projetado)
+                    "Markup Atual": f"{markup_real:.2f}x",
+                    "Lucro Projetado (Total)": float(lucro_total_projetado)
                 })
             
-            col_tab_ind, col_btn_limpar = st.columns([5, 1])
+            col_tab_ind, col_btn_limpar = st.columns([6, 1])
             
-            # Tabela Editável
+            # Tabela Interativa de Precificação
             edited_df_analise = col_tab_ind.data_editor(
                 pd.DataFrame(tabela_por_receita),
                 column_config={
@@ -358,14 +359,14 @@ with aba_calculadora:
                     "Rende (Porções)": st.column_config.NumberColumn("Rende (Porções)", disabled=True),
                     "Custo (1 Porção)": st.column_config.NumberColumn("Custo (1 Porção)", format="R$ %.2f", disabled=True),
                     "✏️ Preço Venda (1 Porção)": st.column_config.NumberColumn("✏️ Preço Venda (1 Porção)", format="R$ %.2f", min_value=0.0),
-                    "Markup Real": st.column_config.TextColumn("Markup Real", disabled=True),
-                    "Lucro Projetado Total": st.column_config.NumberColumn("Lucro Projetado Total", format="R$ %.2f", disabled=True)
+                    "Markup Atual": st.column_config.TextColumn("Markup Atual", disabled=True),
+                    "Lucro Projetado (Total)": st.column_config.NumberColumn("Lucro Projetado (Total)", format="R$ %.2f", disabled=True)
                 },
                 use_container_width=True,
                 hide_index=True
             )
             
-            # Atualiza os valores editados de volta
+            # Atualiza o preço da porção se o utilizador editou na tabela e recarrega a página
             mudou = False
             for i, row in edited_df_analise.iterrows():
                 novo_preco = row['✏️ Preço Venda (1 Porção)']
@@ -382,7 +383,7 @@ with aba_calculadora:
 
             st.divider()
 
-            # --- CONSOLIDAÇÃO MESTRE DA LISTA DE COMPRAS ---
+            # --- CONSOLIDAÇÃO MESTRE DA LISTA DE COMPRAS (PACOTES FECHADOS) ---
             ingredientes_consolidados = {}
             custo_proporcional_total = 0
             
@@ -417,7 +418,7 @@ with aba_calculadora:
                     "Desembolso Caixa": f"R$ {custo_mercado_ing:.2f}"
                 })
 
-            # --- SUMÁRIO FINAL ---
+            # --- SUMÁRIO FINAL E FATURAMENTO GERAL ---
             st.markdown("### 📊 Orçamento Total Consolidado (Toda a Produção)")
             col_res1, col_res2, col_res3 = st.columns(3)
             with col_res1:
@@ -425,10 +426,11 @@ with aba_calculadora:
             with col_res2:
                 cartao_financeiro("Desembolso de Caixa (Mercado)", desembolso_mercado_total, "#F44336", "🛒", "Atenção aos pacotes fechados.")
             with col_res3:
+                # O Faturamento global pega o preço editado da porção X a quantidade de porções de CADA linha e soma tudo.
                 faturamento_projetado = sum((item['preco_venda_porcao'] * (item['qtd'] * item['receita'].get('rendimento', 1.0))) for item in st.session_state.fila_producao)
-                cartao_financeiro("Faturamento Projetado", faturamento_projetado, "#4CAF50", "🤑", "Se vender tudo pelo preço definido acima.")
+                cartao_financeiro("Faturamento Projetado", faturamento_projetado, "#4CAF50", "🤑", "Soma de todas as vendas pelo preço definido.")
             
-            st.markdown("### 📝 Lista de Compras Pura (Para Levar ao Mercado)")
+            st.markdown("### 📝 Lista de Compras Otimizada (Para Levar ao Mercado)")
             st.dataframe(pd.DataFrame(lista_compras), use_container_width=True, hide_index=True)
 
     else:
