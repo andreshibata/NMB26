@@ -4,6 +4,7 @@ import firebase_admin
 from firebase_admin import credentials
 from firebase_admin import firestore
 import json
+import math # <-- Importante para calcular pacotes inteiros
 
 # --- 1. CONFIGURAÇÃO VISUAL ---
 st.set_page_config(
@@ -68,11 +69,12 @@ def apagar_receita(doc_id):
     db.collection("recipes").document(doc_id).delete()
 
 # --- 4. FUNÇÃO VISUAL (CARTÕES COLORIDOS) ---
-def cartao_financeiro(titulo, valor, cor_fundo, cor_texto, icone):
+def cartao_financeiro(titulo, valor, cor_fundo, cor_texto, icone, subtitulo=""):
     st.markdown(f"""
     <div style="background-color: {cor_fundo}; padding: 15px; border-radius: 15px; border-left: 5px solid {cor_texto}; margin-bottom: 10px;">
         <p style="color: {cor_texto}; font-size: 14px; margin: 0; font-weight: bold;">{icone} {titulo}</p>
         <p style="color: #333; font-size: 24px; margin: 0; font-weight: bold;">R$ {valor:,.2f}</p>
+        <p style="color: #666; font-size: 12px; margin: 0;">{subtitulo}</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -93,11 +95,11 @@ if 'carrinho' not in st.session_state: st.session_state.carrinho = []
 aba_criar, aba_listar, aba_calculadora = st.tabs([
     "📝 Nova Receita", 
     "📚 Minhas Receitas", 
-    "⚖️ Calculadora (X Unidades)"
+    "⚖️ Calculadora de Produção"
 ])
 
 # ==================================================
-# ABA 1: CRIAR RECEITA (Foco em Custo Base)
+# ABA 1: CRIAR RECEITA
 # ==================================================
 with aba_criar:
     st.caption("Crie a ficha técnica de 1 unidade/lote base da sua receita.")
@@ -119,7 +121,7 @@ with aba_criar:
             
             if t_pacote > 0 and uso > 0:
                 custo_previsto = (p_compra / t_pacote) * uso
-                st.info(f"💰 Custo Proporcional: **R$ {custo_previsto:.2f}**")
+                st.info(f"💰 Custo Proporcional na receita: **R$ {custo_previsto:.2f}**")
             
             if st.button("⬇️ Adicionar Item"):
                 if t_pacote > 0 and uso > 0 and nome_ing:
@@ -139,7 +141,7 @@ with aba_criar:
             st.dataframe(df[["nome", "qtd_usada", "unidade", "custo_final"]], use_container_width=True, hide_index=True)
             
             custo_total = df['custo_final'].sum()
-            cartao_financeiro("Custo Total da Receita", custo_total, "#FFF3E0", "#FF9800", "🏷️")
+            cartao_financeiro("Custo Base da Receita", custo_total, "#FFF3E0", "#FF9800", "🏷️", "Base para precificação.")
             
             with st.form("save_recipe"):
                 n_rec = st.text_input("Nome da Receita (ex: Bolo de Cenoura Inteiro)")
@@ -159,7 +161,7 @@ with aba_criar:
             st.info("A ficha técnica está vazia. Adicione ingredientes ao lado.")
 
 # ==================================================
-# ABA 2: MINHAS RECEITAS (Banco de Dados)
+# ABA 2: MINHAS RECEITAS
 # ==================================================
 with aba_listar:
     st.subheader("📚 Banco de Receitas")
@@ -179,11 +181,11 @@ with aba_listar:
         st.info("Nenhuma receita salva ainda.")
 
 # ==================================================
-# ABA 3: CALCULADORA (Custo para X unidades)
+# ABA 3: CALCULADORA (X Unidades & Pacotes Inteiros)
 # ==================================================
 with aba_calculadora:
-    st.subheader("⚖️ Planejamento de Produção")
-    st.caption("Descubra quanto vai custar e o que precisa comprar para fazer X quantidades de uma receita.")
+    st.subheader("⚖️ Planejamento de Produção & Compras")
+    st.caption("Descubra o custo de fabricação e quanto dinheiro você precisa para ir ao mercado comprar as embalagens fechadas.")
     
     receitas_calc = pegar_receitas()
     
@@ -196,26 +198,49 @@ with aba_calculadora:
         
         st.divider()
         
-        custo_multiplicado = dados_rec['total_cost'] * multiplicador
+        # Variáveis para somar os totais
+        custo_proporcional_total = 0 # O custo exato das gramas usadas (para precificar)
+        desembolso_mercado_total = 0 # O dinheiro que você deixa no caixa do mercado (pacotes inteiros)
         
-        col_res1, col_res2 = st.columns(2)
-        with col_res1:
-            cartao_financeiro("Custo para Produção", custo_multiplicado, "#FFEBEE", "#D32F2F", "🔴")
-        with col_res2:
-            sugestao_venda = custo_multiplicado * 3 # Exemplo de markup (x3)
-            cartao_financeiro("Sugestão de Venda (Markup 3x)", sugestao_venda, "#E8F5E9", "#388E3C", "🤑")
-        
-        st.markdown("### 🛒 Lista de Compras Exata")
         lista_compras = []
+        
         for ing in dados_rec['ingredients']:
+            # 1. Necessidade exata na receita
             qtd_total_necessaria = ing['qtd_usada'] * multiplicador
-            custo_ing_total = ing['custo_final'] * multiplicador
+            custo_prop_ing = ing['custo_final'] * multiplicador
+            custo_proporcional_total += custo_prop_ing
+            
+            # 2. Lógica de Mercado (Pacotes Inteiros)
+            tam_pacote = ing['tam_pacote']
+            preco_pacote = ing['preco_compra']
+            
+            # math.ceil arredonda para cima. Ex: 1100g necessárias / 1000g o pacote = 1.1 -> compra 2 pacotes.
+            pacotes_necessarios = math.ceil(qtd_total_necessaria / tam_pacote)
+            custo_mercado_ing = pacotes_necessarios * preco_pacote
+            desembolso_mercado_total += custo_mercado_ing
+            
             lista_compras.append({
                 "Ingrediente": ing['nome'],
-                "Quantidade Necessária": f"{qtd_total_necessaria:.2f} {ing['unidade']}",
-                "Custo Proporcional": f"R$ {custo_ing_total:.2f}"
+                "Uso Exato": f"{qtd_total_necessaria:.1f} {ing['unidade']}",
+                "Comprar (Pacotes)": f"{pacotes_necessarios}x ({tam_pacote}{ing['unidade']})",
+                "Custo Proporcional": f"R$ {custo_prop_ing:.2f}",
+                "Desembolso Caixa": f"R$ {custo_mercado_ing:.2f}"
             })
-            
+
+        # Exibindo os Cards Financeiros
+        col_res1, col_res2, col_res3 = st.columns(3)
+        with col_res1:
+            # O custo que você usa para descobrir se a empresa dá lucro
+            cartao_financeiro("Custo Proporcional", custo_proporcional_total, "#FFF3E0", "#FF9800", "⚖️", "Custo real das gramas usadas.")
+        with col_res2:
+            # O custo que dói no bolso no dia da compra
+            cartao_financeiro("Desembolso no Mercado", desembolso_mercado_total, "#FFEBEE", "#D32F2F", "🛒", "Valor pago nas embalagens fechadas.")
+        with col_res3:
+            sugestao_venda = custo_proporcional_total * 3 # Markup baseado no custo proporcional
+            cartao_financeiro("Sugestão de Venda Total", sugestao_venda, "#E8F5E9", "#388E3C", "🤑", "Markup 3x sobre Custo Proporcional.")
+        
+        # Exibindo a Tabela de Compras
+        st.markdown("### 📝 Lista de Compras Exata")
         st.dataframe(pd.DataFrame(lista_compras), use_container_width=True, hide_index=True)
         
     else:
