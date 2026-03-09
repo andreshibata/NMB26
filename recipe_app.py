@@ -63,7 +63,7 @@ def salvar_receita(nome, autor, ingredientes, rendimento):
 def apagar_receita(doc_id):
     db.collection("recipes").document(doc_id).delete()
 
-# --- FUNÇÕES DE PLANEAMENTO DE PRODUÇÃO (NOVIDADE) ---
+# --- FUNÇÕES DE PLANEAMENTO ---
 def pegar_planeamentos():
     docs = db.collection("productions").stream()
     return [{"id": doc.id, **doc.to_dict()} for doc in docs]
@@ -230,7 +230,6 @@ with aba_listar:
 with aba_calculadora:
     st.subheader("🛒 Carrinho de Produção")
     
-    # --- NOVIDADE 1: GESTOR DE PLANEAMENTOS SALVOS ---
     with st.expander("📂 Carregar / Gerir Planeamentos de Produção Salvos"):
         planos_salvos = pegar_planeamentos()
         if planos_salvos:
@@ -270,6 +269,7 @@ with aba_calculadora:
                 st.rerun()
 
         if st.session_state.fila_producao:
+            # --- MOTOR DE NORMALIZAÇÃO DE MEDIDAS (RESOLVE O BUG DO KG VS G) ---
             def extrair_ingredientes_base(receita, mult_atual):
                 ingredientes_finais = []
                 for ing in receita['ingredients']:
@@ -280,16 +280,34 @@ with aba_calculadora:
                             ingredientes_finais.extend(extrair_ingredientes_base(sub_rec_dados, mult_sub))
                     else:
                         ing_copy = ing.copy()
-                        ing_copy['qtd_usada'] = ing['qtd_usada'] * mult_atual
-                        ing_copy['custo_final'] = (ing['preco_compra'] / ing['tam_pacote']) * ing_copy['qtd_usada']
+                        
+                        # --- INÍCIO DA NORMALIZAÇÃO ---
+                        medida = ing_copy.get('unidade', 'unid')
+                        qtd = ing_copy.get('qtd_usada', 0)
+                        tam = ing_copy.get('tam_pacote', 1)
+                        
+                        if medida == 'kg':
+                            qtd = qtd * 1000
+                            tam = tam * 1000
+                            medida = 'g'
+                        elif medida == 'L':
+                            qtd = qtd * 1000
+                            tam = tam * 1000
+                            medida = 'ml'
+                            
+                        ing_copy['qtd_usada'] = qtd * mult_atual
+                        ing_copy['tam_pacote'] = tam
+                        ing_copy['unidade'] = medida
+                        # Custo recalcullado para garantir a precisão
+                        ing_copy['custo_final'] = (ing_copy['preco_compra'] / tam) * ing_copy['qtd_usada']
+                        # --- FIM DA NORMALIZAÇÃO ---
+                        
                         ingredientes_finais.append(ing_copy)
                 return ingredientes_finais
 
             st.markdown("### 🔍 Precificação e Produção (Editável)")
-            st.caption("Dê dois cliques na coluna **Fornadas** para alterar quantidades ou na coluna **Preço Venda** para alterar margens. *Dica: Coloque 0 nas Fornadas para remover o item.*")
             
             tabela_por_receita = []
-            
             for index, item in enumerate(st.session_state.fila_producao):
                 ing_puros_item = extrair_ingredientes_base(item['receita'], item['qtd'])
                 custo_total_fornada_produzida = sum(i['custo_final'] for i in ing_puros_item)
@@ -316,7 +334,6 @@ with aba_calculadora:
                     "Lucro Projetado (Total)": float(lucro_total_projetado)
                 })
             
-            # --- NOVIDADE 2: EDIÇÃO DE QUANTIDADES ---
             df_precificacao = pd.DataFrame(tabela_por_receita)
             
             edited_df_analise = st.data_editor(
@@ -343,14 +360,12 @@ with aba_calculadora:
                     mudou = True
             
             if mudou:
-                # Remove itens com 0 fornadas automaticamente
                 st.session_state.fila_producao = [item for item in st.session_state.fila_producao if item['qtd'] > 0]
                 st.rerun()
 
             c_down_prec, c_clear = st.columns([1, 1])
-            # Exportação preparada para Excel em PT/BR (sep=';', decimal=',')
             csv_precificacao = df_precificacao.to_csv(index=False, sep=';', decimal=',').encode('utf-8-sig')
-            c_down_prec.download_button("⬇️ Exportar Precificação (Excel/CSV)", data=csv_precificacao, file_name="precificacao.csv", mime="text/csv", use_container_width=True)
+            c_down_prec.download_button("⬇️ Exportar Precificação (CSV)", data=csv_precificacao, file_name="precificacao.csv", mime="text/csv", use_container_width=True)
             if c_clear.button("🗑️ Limpar Carrinho Inteiro", use_container_width=True):
                 st.session_state.fila_producao = []; st.rerun()
 
@@ -374,9 +389,12 @@ with aba_calculadora:
             lista_compras = []
             
             for nome, dados in ingredientes_consolidados.items():
+                # O pacote e a quantidade total já estão na mesma unidade base (ex: tudo em gramas) graças à normalização
                 pacotes_necessarios = math.ceil(dados["qtd_total"] / dados["tam_pacote"])
                 custo_mercado_ing = pacotes_necessarios * dados["preco_compra"]
                 desembolso_mercado_total += custo_mercado_ing
+                
+                # Para exibição, mostra a unidade que ficou (g ou ml)
                 lista_compras.append({
                     "Ingrediente": nome,
                     "Necessidade Real": f"{dados['qtd_total']:.1f} {dados['unidade']}",
@@ -396,15 +414,12 @@ with aba_calculadora:
             df_compras = pd.DataFrame(lista_compras)
             st.dataframe(df_compras, use_container_width=True, hide_index=True)
             
-            # Exportação de Compras
             csv_compras = df_compras.to_csv(index=False, sep=';', decimal=',').encode('utf-8-sig')
-            st.download_button("⬇️ Baixar Lista de Compras (Excel/CSV)", data=csv_compras, file_name="lista_compras.csv", mime="text/csv")
+            st.download_button("⬇️ Baixar Lista de Compras (CSV)", data=csv_compras, file_name="lista_compras.csv", mime="text/csv")
 
             st.divider()
             
-            # --- NOVIDADE 3: SALVAR A PRODUÇÃO INTEIRA ---
             st.markdown("### 💾 Guardar este Planeamento")
-            st.caption("Salve esta configuração de produção e preços para carregar novamente no futuro.")
             c_nome_plano, c_salvar_plano = st.columns([3, 1])
             nome_novo_plano = c_nome_plano.text_input("Nome (ex: Encomenda Sexta-feira)", value=st.session_state.nome_plano_atual)
             if c_salvar_plano.button("Guardar Planeamento", use_container_width=True):
