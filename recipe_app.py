@@ -35,7 +35,7 @@ def conectar():
                 cred = credentials.Certificate(key_dict)
                 firebase_admin.initialize_app(cred)
             else:
-                st.error("🔌 Erro de conexão com o banco.")
+                st.error("🔌 Erro de conexão com a base de dados.")
                 st.stop()
     return firestore.client()
 
@@ -82,48 +82,97 @@ c_head1.markdown("# 🥘")
 c_head2.title("Panela de Controle | Ficha Técnica")
 
 with st.sidebar:
-    st.caption("Admin")
-    if st.text_input("Senha", type="password") != st.secrets.get("senha_app", "admin"):
-        st.warning("🔒 Digite a senha para acessar."); st.stop()
+    st.caption("Administração")
+    if st.text_input("Palavra-passe", type="password") != st.secrets.get("senha_app", "admin"):
+        st.warning("🔒 Digite a palavra-passe para aceder."); st.stop()
 
 # ESTADO DA SESSÃO
 if 'fila_producao' not in st.session_state: 
     st.session_state.fila_producao = []
+if 'df_ingredientes' not in st.session_state:
+    st.session_state.df_ingredientes = pd.DataFrame(
+        columns=["Tipo", "Nome", "Preco_Pacote", "Tam_Pacote", "Medida", "Qtd_Usada"]
+    )
+if 'rec_nome_edicao' not in st.session_state: st.session_state.rec_nome_edicao = ""
+if 'rec_autor_edicao' not in st.session_state: st.session_state.rec_autor_edicao = "Chef"
+
+# Buscar receitas logo no início para usar em todas as abas
+receitas_salvas = pegar_receitas()
+dict_receitas = {r['name']: r for r in receitas_salvas}
 
 # ABAS PRINCIPAIS
 aba_criar, aba_listar, aba_calculadora = st.tabs([
-    "📝 Nova Receita", 
-    "📚 Minhas Receitas", 
-    "🛒 Planejador de Produção"
+    "📝 Criar / Editar Receita", 
+    "📚 As Minhas Receitas", 
+    "🛒 Planeador de Produção"
 ])
 
 # ==================================================
-# ABA 1: CRIAR RECEITA
+# ABA 1: CRIAR / EDITAR RECEITA
 # ==================================================
 with aba_criar:
-    st.caption("Monte sua receita. Adicione linhas à tabela abaixo para incluir novos ingredientes.")
+    with st.expander("✏️ Carregar uma Receita Existente para Editar"):
+        opcoes_edicao = ["-- Selecione para editar --"] + list(dict_receitas.keys())
+        rec_selecionada = st.selectbox("Receitas Guardadas:", opcoes_edicao)
+        
+        if st.button("Carregar Dados"):
+            if rec_selecionada != "-- Selecione para editar --":
+                rec_dados = dict_receitas[rec_selecionada]
+                st.session_state.rec_nome_edicao = rec_dados['name']
+                st.session_state.rec_autor_edicao = rec_dados.get('author', 'Chef')
+                
+                df_temp = pd.DataFrame(rec_dados['ingredients'])
+                novo_df = pd.DataFrame()
+                novo_df['Tipo'] = df_temp.get('tipo', 'Ingrediente')
+                novo_df['Nome'] = df_temp['nome']
+                novo_df['Preco_Pacote'] = df_temp['preco_compra']
+                novo_df['Tam_Pacote'] = df_temp['tam_pacote']
+                novo_df['Medida'] = df_temp['unidade']
+                novo_df['Qtd_Usada'] = df_temp['qtd_usada']
+                
+                st.session_state.df_ingredientes = novo_df
+                st.rerun()
+
+    st.divider()
     
     col_info, col_vazia = st.columns([2, 1])
     with col_info:
-        nome_receita = st.text_input("Nome da Receita (ex: Bolo de Cenoura)")
-        autor_receita = st.text_input("Criador/Chef", value="Chef")
+        nome_receita = st.text_input("Nome da Receita (Ex: Bento de Karaage)", value=st.session_state.rec_nome_edicao)
+        autor_receita = st.text_input("Criador/Chef", value=st.session_state.rec_autor_edicao)
 
-    st.markdown("### 🛒 Ingredientes da Receita")
+    st.markdown("### 🛒 Ingredientes e Sub-receitas")
     
-    if 'df_ingredientes' not in st.session_state:
-        st.session_state.df_ingredientes = pd.DataFrame(
-            columns=["Ingrediente", "Preco_Pacote", "Tam_Pacote", "Medida", "Qtd_Usada"]
-        )
+    with st.popover("➕ Adicionar uma Sub-Receita (Ex: Inserir o Karaage aqui)"):
+        if receitas_salvas:
+            sel_sub = st.selectbox("Escolher Receita Base", list(dict_receitas.keys()))
+            qtd_sub = st.number_input("Quantas receitas vai usar na mistura?", min_value=0.01, value=1.0)
+            if st.button("Inserir Sub-Receita na Tabela"):
+                rec_sub_dados = dict_receitas[sel_sub]
+                nova_linha = pd.DataFrame([{
+                    "Tipo": "Sub-receita",
+                    "Nome": rec_sub_dados['name'],
+                    "Preco_Pacote": rec_sub_dados['total_cost'],
+                    "Tam_Pacote": 1.0, 
+                    "Medida": "receita",
+                    "Qtd_Usada": qtd_sub
+                }])
+                st.session_state.df_ingredientes = pd.concat([st.session_state.df_ingredientes, nova_linha], ignore_index=True)
+                st.rerun()
+        else:
+            st.warning("Ainda não tem outras receitas para utilizar como sub-receita.")
 
+    st.caption("Edite os valores abaixo. Note que o 'Preço do Pacote' aceita o valor **0** em caso de patrocínio.")
+    
     edited_df = st.data_editor(
         st.session_state.df_ingredientes,
         num_rows="dynamic",
         column_config={
-            "Ingrediente": st.column_config.TextColumn("Nome do Ingrediente", required=True),
-            "Preco_Pacote": st.column_config.NumberColumn("Preço do Pacote (R$)", min_value=0.01, format="%.2f"),
-            "Tam_Pacote": st.column_config.NumberColumn("Tamanho Pacote", min_value=0.01),
-            "Medida": st.column_config.SelectboxColumn("Medida", options=["g", "ml", "unid", "kg", "L"]),
-            "Qtd_Usada": st.column_config.NumberColumn("Qtd Usada na Receita", min_value=0.01)
+            "Tipo": st.column_config.SelectboxColumn("Tipo", options=["Ingrediente", "Sub-receita"], default="Ingrediente"),
+            "Nome": st.column_config.TextColumn("Nome do Item", required=True),
+            "Preco_Pacote": st.column_config.NumberColumn("Preço do Pacote (R$)", min_value=0.0, format="%.2f"), 
+            "Tam_Pacote": st.column_config.NumberColumn("Tamanho Pacote/Rendimento", min_value=0.0001),
+            "Medida": st.column_config.SelectboxColumn("Medida", options=["g", "ml", "unid", "kg", "L", "receita"]),
+            "Qtd_Usada": st.column_config.NumberColumn("Qtd Usada na Receita", min_value=0.0001)
         },
         use_container_width=True,
         hide_index=True
@@ -135,14 +184,13 @@ with aba_criar:
     
     for _, row in linhas_validas.iterrows():
         if row['Tam_Pacote'] > 0:
-            # Padronizar o nome do ingrediente para evitar duplicações na consolidação depois (ex: 'Açúcar' e 'açúcar')
-            nome_limpo = str(row['Ingrediente']).strip().title()
-            
+            nome_limpo = str(row['Nome']).strip().title()
             custo_linha = (row['Preco_Pacote'] / row['Tam_Pacote']) * row['Qtd_Usada']
             custo_total_estimado += custo_linha
             
             ingredientes_processados.append({
-                "nome": nome_limpo,
+                "tipo": row['Tipo'],
+                "nome": nome_limpo if row['Tipo'] == 'Ingrediente' else row['Nome'], 
                 "preco_compra": row['Preco_Pacote'],
                 "tam_pacote": row['Tam_Pacote'],
                 "unidade": row['Medida'],
@@ -150,113 +198,152 @@ with aba_criar:
                 "custo_final": custo_linha
             })
 
-    if custo_total_estimado > 0:
-        st.info(f"💰 Custo Base Atual da Receita: **R$ {custo_total_estimado:.2f}**")
+    if custo_total_estimado >= 0:
+        st.info(f"💰 Custo Base Atual: **R$ {custo_total_estimado:.2f}**")
 
-    if st.button("💾 Salvar Receita no Banco", type="primary"):
+    c_save, c_clear = st.columns([1, 4])
+    if c_save.button("💾 Guardar Receita", type="primary"):
         if not nome_receita:
-            st.error("⚠️ Dê um nome para a receita antes de salvar.")
+            st.error("⚠️ Dê um nome à receita antes de guardar.")
         elif not ingredientes_processados:
-            st.error("⚠️ Preencha os ingredientes corretamente antes de salvar.")
+            st.error("⚠️ Preencha os ingredientes corretamente.")
         else:
             salvar_receita(nome_receita, autor_receita, ingredientes_processados)
             st.balloons()
-            st.success(f"Receita '{nome_receita}' salva com sucesso!")
-            st.session_state.df_ingredientes = pd.DataFrame(columns=["Ingrediente", "Preco_Pacote", "Tam_Pacote", "Medida", "Qtd_Usada"])
+            st.success(f"Receita '{nome_receita}' guardada com sucesso!")
+            st.session_state.df_ingredientes = pd.DataFrame(columns=["Tipo", "Nome", "Preco_Pacote", "Tam_Pacote", "Medida", "Qtd_Usada"])
+            st.session_state.rec_nome_edicao = ""
             st.rerun()
+            
+    if c_clear.button("🗑️ Limpar Formulário"):
+        st.session_state.df_ingredientes = pd.DataFrame(columns=["Tipo", "Nome", "Preco_Pacote", "Tam_Pacote", "Medida", "Qtd_Usada"])
+        st.session_state.rec_nome_edicao = ""
+        st.rerun()
 
 # ==================================================
-# ABA 2: MINHAS RECEITAS
+# ABA 2: AS MINHAS RECEITAS
 # ==================================================
 with aba_listar:
-    st.subheader("📚 Banco de Receitas")
-    receitas_salvas = pegar_receitas()
+    st.subheader("📚 Base de Dados de Receitas")
     
     if receitas_salvas:
         for rec in receitas_salvas:
             with st.expander(f"🍽️ {rec['name']} - Custo Base: R$ {rec['total_cost']:.2f}"):
                 st.caption(f"Autor: {rec.get('author', 'Desconhecido')}")
                 df_ing = pd.DataFrame(rec['ingredients'])
-                st.dataframe(df_ing[["nome", "qtd_usada", "unidade", "custo_final"]], use_container_width=True, hide_index=True)
+                st.dataframe(df_ing[["tipo", "nome", "qtd_usada", "unidade", "custo_final"]], use_container_width=True, hide_index=True)
                 
                 if st.button("🗑️ Apagar esta receita", key=f"del_{rec['id']}"):
                     apagar_receita(rec['id'])
                     st.rerun()
     else:
-        st.info("Nenhuma receita salva ainda.")
+        st.info("Ainda não tem receitas guardadas.")
 
 # ==================================================
-# ABA 3: PLANEJADOR DE PRODUÇÃO CONSOLIDADO
+# ABA 3: PLANEADOR DE PRODUÇÃO E VENDAS
 # ==================================================
 with aba_calculadora:
     st.subheader("🛒 Carrinho de Produção")
-    st.caption("Adicione várias receitas ao carrinho. O sistema juntará os ingredientes iguais para otimizar sua ida ao mercado.")
     
-    receitas_calc = pegar_receitas()
+    # --- NOVIDADE: MARKUP GLOBAL DINÂMICO ---
+    col_markup, col_vazia2 = st.columns([1, 2])
+    with col_markup:
+        markup_global = st.number_input(
+            "📈 Markup Sugerido (Multiplicador)", 
+            min_value=1.0, value=3.0, step=0.1, 
+            help="Ex: 3.0 significa que vai vender pelo triplo do custo base. (Pode usar 2.5, 4.0, etc.)"
+        )
     
-    if receitas_calc:
+    st.divider()
+
+    if receitas_salvas:
         with st.container(border=True):
             c_sel, c_qtd, c_btn = st.columns([2, 1, 1])
-            r_escolhida = c_sel.selectbox("Escolha a Receita", [r['name'] for r in receitas_calc])
-            dados_rec = next(r for r in receitas_calc if r['name'] == r_escolhida)
-            multiplicador = c_qtd.number_input("Qtd", min_value=1.0, value=1.0, step=1.0)
+            r_escolhida = c_sel.selectbox("Escolha a Receita", list(dict_receitas.keys()))
+            dados_rec = dict_receitas.get(r_escolhida)
+            multiplicador = c_qtd.number_input("Qtd a Produzir", min_value=1.0, value=1.0, step=1.0)
             
-            if c_btn.button("➕ Adicionar ao Carrinho"):
+            if c_btn.button("➕ Adicionar à Fila"):
                 st.session_state.fila_producao.append({
                     "receita": dados_rec,
                     "qtd": multiplicador
                 })
                 st.rerun()
 
-        # Exibir o que está na fila
         if st.session_state.fila_producao:
-            st.markdown("### 📋 Receitas na Fila")
-            fila_display = []
-            for idx, item in enumerate(st.session_state.fila_producao):
-                fila_display.append({"Receita": item['receita']['name'], "Qtd a Produzir": item['qtd']})
+            # --- FUNÇÃO RECURSIVA PARA DESEMPACOTAR SUB-RECEITAS ---
+            def extrair_ingredientes_base(receita, mult_atual):
+                ingredientes_finais = []
+                for ing in receita['ingredients']:
+                    if ing.get('tipo', 'Ingrediente') == 'Sub-receita':
+                        sub_rec_dados = dict_receitas.get(ing['nome'])
+                        if sub_rec_dados:
+                            mult_sub = (ing['qtd_usada'] / ing['tam_pacote']) * mult_atual
+                            ingredientes_finais.extend(extrair_ingredientes_base(sub_rec_dados, mult_sub))
+                    else:
+                        ing_copy = ing.copy()
+                        ing_copy['qtd_usada'] = ing['qtd_usada'] * mult_atual
+                        ing_copy['custo_final'] = (ing['preco_compra'] / ing['tam_pacote']) * ing_copy['qtd_usada']
+                        ingredientes_finais.append(ing_copy)
+                return ingredientes_finais
+
+            # ==========================================
+            # NOVIDADE: ANÁLISE INDIVIDUAL POR RECEITA
+            # ==========================================
+            st.markdown("### 🔍 Análise Financeira por Receita")
+            tabela_por_receita = []
             
-            col_tabela, col_limpar = st.columns([4, 1])
-            col_tabela.dataframe(pd.DataFrame(fila_display), use_container_width=True, hide_index=True)
-            if col_limpar.button("🗑️ Limpar Carrinho"):
+            for index, item in enumerate(st.session_state.fila_producao):
+                # Extrai ingredientes e calcula o custo ATUALIZADO daquela fornada
+                ing_puros_item = extrair_ingredientes_base(item['receita'], item['qtd'])
+                custo_total_item = sum(i['custo_final'] for i in ing_puros_item)
+                
+                # Projeções baseadas no Markup
+                venda_total_item = custo_total_item * markup_global
+                venda_unidade_item = venda_total_item / item['qtd'] if item['qtd'] > 0 else 0
+                lucro_total_item = venda_total_item - custo_total_item
+                
+                tabela_por_receita.append({
+                    "Produto": item['receita']['name'],
+                    "Qtd (Fornada)": item['qtd'],
+                    "Custo (Fornada)": f"R$ {custo_total_item:.2f}",
+                    "Venda Sugerida (UNIDADE)": f"R$ {venda_unidade_item:.2f}",
+                    "Venda Sugerida (FORNADA)": f"R$ {venda_total_item:.2f}",
+                    "Lucro Projetado": f"R$ {lucro_total_item:.2f}"
+                })
+            
+            # Mostra a tabela rica com os dados comerciais
+            col_tab_ind, col_btn_limpar = st.columns([5, 1])
+            col_tab_ind.dataframe(pd.DataFrame(tabela_por_receita), use_container_width=True, hide_index=True)
+            if col_btn_limpar.button("🗑️ Limpar Fila"):
                 st.session_state.fila_producao = []
                 st.rerun()
 
             st.divider()
 
-            # --- LÓGICA DE CONSOLIDAÇÃO DE INGREDIENTES ---
+            # --- CONSOLIDAÇÃO MESTRE DA LISTA DE COMPRAS ---
             ingredientes_consolidados = {}
             custo_proporcional_total = 0
             
             for item in st.session_state.fila_producao:
-                rec = item['receita']
-                mult = item['qtd']
-                
-                for ing in rec['ingredients']:
+                lista_ingredientes_puros = extrair_ingredientes_base(item['receita'], item['qtd'])
+                for ing in lista_ingredientes_puros:
                     nome = ing['nome']
-                    # Se o ingrediente ainda não está no nosso dicionário consolidado, criamos
                     if nome not in ingredientes_consolidados:
                         ingredientes_consolidados[nome] = {
-                            "qtd_total": 0,
-                            "tam_pacote": ing['tam_pacote'],
-                            "preco_compra": ing['preco_compra'],
-                            "unidade": ing['unidade'],
+                            "qtd_total": 0, "tam_pacote": ing['tam_pacote'], 
+                            "preco_compra": ing['preco_compra'], "unidade": ing['unidade'], 
                             "custo_prop_acumulado": 0
                         }
                     
-                    # Somamos a quantidade e o custo proporcional
-                    qtd_necessaria = ing['qtd_usada'] * mult
-                    custo_prop = ing['custo_final'] * mult
-                    
-                    ingredientes_consolidados[nome]["qtd_total"] += qtd_necessaria
-                    ingredientes_consolidados[nome]["custo_prop_acumulado"] += custo_prop
-                    custo_proporcional_total += custo_prop
+                    ingredientes_consolidados[nome]["qtd_total"] += ing['qtd_usada']
+                    ingredientes_consolidados[nome]["custo_prop_acumulado"] += ing['custo_final']
+                    custo_proporcional_total += ing['custo_final']
 
-            # --- LÓGICA DE MERCADO (PACOTES FECHADOS) ---
             desembolso_mercado_total = 0
             lista_compras = []
             
             for nome, dados in ingredientes_consolidados.items():
-                # Calcula os pacotes usando o total somado de todas as receitas
                 pacotes_necessarios = math.ceil(dados["qtd_total"] / dados["tam_pacote"])
                 custo_mercado_ing = pacotes_necessarios * dados["preco_compra"]
                 desembolso_mercado_total += custo_mercado_ing
@@ -269,20 +356,19 @@ with aba_calculadora:
                     "Desembolso Caixa": f"R$ {custo_mercado_ing:.2f}"
                 })
 
-            # Exibindo os Cards Financeiros Totais
-            st.markdown("### 📊 Orçamento Total Consolidado")
+            # --- SUMÁRIO FINAL ---
+            st.markdown("### 📊 Orçamento Total Consolidado (Toda a Produção)")
             col_res1, col_res2, col_res3 = st.columns(3)
             with col_res1:
-                cartao_financeiro("Custo Proporcional Total", custo_proporcional_total, "#FF9800", "⚖️", "Custo real das gramas de toda a produção.")
+                cartao_financeiro("Custo Proporcional", custo_proporcional_total, "#FF9800", "⚖️", "Custo real das gramas utilizadas.")
             with col_res2:
-                cartao_financeiro("Desembolso no Mercado", desembolso_mercado_total, "#F44336", "🛒", "Valor total no caixa do mercado.")
+                cartao_financeiro("Desembolso de Caixa (Mercado)", desembolso_mercado_total, "#F44336", "🛒", "Atenção aos pacotes fechados.")
             with col_res3:
-                sugestao_venda = custo_proporcional_total * 3
-                cartao_financeiro("Faturamento Sugerido", sugestao_venda, "#4CAF50", "🤑", "Markup 3x sobre o Proporcional.")
+                sugestao_venda_global = custo_proporcional_total * markup_global
+                cartao_financeiro(f"Faturamento Total (Markup {markup_global}x)", sugestao_venda_global, "#4CAF50", "🤑", "Se vender toda a produção programada.")
             
-            # Tabela de Compras Final
-            st.markdown("### 📝 Lista de Compras Otimizada")
+            st.markdown("### 📝 Lista de Compras Pura (Para Levar ao Mercado)")
             st.dataframe(pd.DataFrame(lista_compras), use_container_width=True, hide_index=True)
 
     else:
-        st.warning("Crie e salve uma receita na primeira aba para usar o planejador.")
+        st.warning("Crie e guarde uma receita na primeira aba para utilizar o planeador.")
