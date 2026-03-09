@@ -123,7 +123,10 @@ with aba_criar:
                 
                 df_temp = pd.DataFrame(rec_dados['ingredients'])
                 novo_df = pd.DataFrame()
-                novo_df['Tipo'] = df_temp.get('tipo', 'Ingrediente')
+                
+                # CORREÇÃO DO KEYERROR AQUI:
+                novo_df['Tipo'] = df_temp['tipo'] if 'tipo' in df_temp.columns else 'Ingrediente'
+                
                 novo_df['Nome'] = df_temp['nome']
                 novo_df['Preco_Pacote'] = df_temp['preco_compra']
                 novo_df['Tam_Pacote'] = df_temp['tam_pacote']
@@ -231,6 +234,11 @@ with aba_listar:
             with st.expander(f"🍽️ {rec['name']} - Custo Base: R$ {rec['total_cost']:.2f}"):
                 st.caption(f"Autor: {rec.get('author', 'Desconhecido')}")
                 df_ing = pd.DataFrame(rec['ingredients'])
+                
+                # CORREÇÃO DO KEYERROR AQUI:
+                if 'tipo' not in df_ing.columns:
+                    df_ing['tipo'] = 'Ingrediente'
+                    
                 st.dataframe(df_ing[["tipo", "nome", "qtd_usada", "unidade", "custo_final"]], use_container_width=True, hide_index=True)
                 
                 if st.button("🗑️ Apagar esta receita", key=f"del_{rec['id']}"):
@@ -245,7 +253,6 @@ with aba_listar:
 with aba_calculadora:
     st.subheader("🛒 Carrinho de Produção")
     
-    # --- NOVIDADE: MARKUP GLOBAL DINÂMICO ---
     col_markup, col_vazia2 = st.columns([1, 2])
     with col_markup:
         markup_global = st.number_input(
@@ -288,17 +295,15 @@ with aba_calculadora:
                 return ingredientes_finais
 
             # ==========================================
-            # NOVIDADE: ANÁLISE INDIVIDUAL POR RECEITA
+            # ANÁLISE INDIVIDUAL POR RECEITA
             # ==========================================
             st.markdown("### 🔍 Análise Financeira por Receita")
             tabela_por_receita = []
             
             for index, item in enumerate(st.session_state.fila_producao):
-                # Extrai ingredientes e calcula o custo ATUALIZADO daquela fornada
                 ing_puros_item = extrair_ingredientes_base(item['receita'], item['qtd'])
                 custo_total_item = sum(i['custo_final'] for i in ing_puros_item)
                 
-                # Projeções baseadas no Markup
                 venda_total_item = custo_total_item * markup_global
                 venda_unidade_item = venda_total_item / item['qtd'] if item['qtd'] > 0 else 0
                 lucro_total_item = venda_total_item - custo_total_item
@@ -312,7 +317,6 @@ with aba_calculadora:
                     "Lucro Projetado": f"R$ {lucro_total_item:.2f}"
                 })
             
-            # Mostra a tabela rica com os dados comerciais
             col_tab_ind, col_btn_limpar = st.columns([5, 1])
             col_tab_ind.dataframe(pd.DataFrame(tabela_por_receita), use_container_width=True, hide_index=True)
             if col_btn_limpar.button("🗑️ Limpar Fila"):
