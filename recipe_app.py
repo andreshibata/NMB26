@@ -16,7 +16,7 @@ st.set_page_config(
 
 st.markdown("""
     <style>
-    .stButton>button { border-radius: 10px; font-weight: bold; width: 100%; }
+    .stButton>button { border-radius: 10px; font-weight: bold; width: 100%; transition: 0.3s; }
     .stDataFrame { border-radius: 10px; }
     h1 { color: #ff4b4b; }
     </style>
@@ -35,7 +35,7 @@ def conectar():
                 cred = credentials.Certificate(key_dict)
                 firebase_admin.initialize_app(cred)
             else:
-                st.error("🔌 Erro de conexão com a base de dados.")
+                st.error("🔌 Erro crítico: Falha na conexão com o banco de dados Firebase.")
                 st.stop()
     return firestore.client()
 
@@ -44,26 +44,24 @@ db = conectar()
 # --- 3. LÓGICA DO SISTEMA ---
 def pegar_receitas():
     docs = db.collection("recipes").stream()
-    lista = []
-    for doc in docs:
-        d = doc.to_dict()
-        d['id'] = doc.id
-        lista.append(d)
-    return lista
+    return [{"id": doc.id, **doc.to_dict()} for doc in docs]
 
 def salvar_receita(nome, autor, ingredientes, rendimento):
     doc_id = f"{nome}_{autor}".replace(" ", "_").lower()
-    custo = sum(i['custo_final'] for i in ingredientes)
+    custo = sum(i.get('custo_final', 0) for i in ingredientes)
     db.collection("recipes").document(doc_id).set({
-        "name": nome, "author": autor, "rendimento": rendimento,
-        "ingredients": ingredientes, "total_cost": custo,
+        "name": nome, 
+        "author": autor, 
+        "rendimento": max(rendimento, 0.01),
+        "ingredients": ingredientes, 
+        "total_cost": custo,
         "updated_at": firestore.SERVER_TIMESTAMP
     }, merge=True)
 
 def apagar_receita(doc_id):
     db.collection("recipes").document(doc_id).delete()
 
-# --- FUNÇÕES DE PLANEAMENTO ---
+# --- FUNÇÕES DE PLANEAMENTO DE PRODUÇÃO ---
 def pegar_planeamentos():
     docs = db.collection("productions").stream()
     return [{"id": doc.id, **doc.to_dict()} for doc in docs]
@@ -71,14 +69,15 @@ def pegar_planeamentos():
 def salvar_planeamento(nome, fila):
     doc_id = nome.replace(" ", "_").lower()
     db.collection("productions").document(doc_id).set({
-        "nome": nome, "fila": fila,
+        "nome": nome, 
+        "fila": fila,
         "updated_at": firestore.SERVER_TIMESTAMP
     }, merge=True)
 
 def apagar_planeamento(doc_id):
     db.collection("productions").document(doc_id).delete()
 
-# --- 4. FUNÇÃO VISUAL ---
+# --- 4. CARTÕES FINANCEIROS DINÂMICOS ---
 def cartao_financeiro(titulo, valor, cor_borda, icone, subtitulo=""):
     st.markdown(f"""
     <div style="background-color: var(--secondary-background-color); padding: 15px; border-radius: 10px; border-left: 5px solid {cor_borda}; margin-bottom: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
@@ -88,17 +87,16 @@ def cartao_financeiro(titulo, valor, cor_borda, icone, subtitulo=""):
     </div>
     """, unsafe_allow_html=True)
 
-# --- 5. INTERFACE ---
+# --- 5. INTERFACE PRINCIPAL ---
 c_head1, c_head2 = st.columns([1, 8])
 c_head1.markdown("# 🥘")
-c_head2.title("Panela de Controle | Ficha Técnica")
+c_head2.title("Panela de Controle | Gestão & Ficha Técnica")
 
 with st.sidebar:
     st.caption("Administração")
     if st.text_input("Palavra-passe", type="password") != st.secrets.get("senha_app", "admin"):
-        st.warning("🔒 Digite a palavra-passe para aceder."); st.stop()
+        st.warning("🔒 Digite a palavra-passe para aceder ao sistema."); st.stop()
 
-# ESTADO DA SESSÃO
 if 'fila_producao' not in st.session_state: st.session_state.fila_producao = []
 if 'nome_plano_atual' not in st.session_state: st.session_state.nome_plano_atual = ""
 if 'df_ingredientes' not in st.session_state:
@@ -110,7 +108,6 @@ if 'rec_rendimento_edicao' not in st.session_state: st.session_state.rec_rendime
 receitas_salvas = pegar_receitas()
 dict_receitas = {r['name']: r for r in receitas_salvas}
 
-# ABAS PRINCIPAIS
 aba_criar, aba_listar, aba_calculadora = st.tabs([
     "📝 Criar / Editar Receita", 
     "📚 As Minhas Receitas", 
@@ -124,7 +121,7 @@ with aba_criar:
     with st.expander("✏️ Carregar uma Receita Existente para Editar"):
         opcoes_edicao = ["-- Selecione para editar --"] + list(dict_receitas.keys())
         rec_selecionada = st.selectbox("Receitas Guardadas:", opcoes_edicao)
-        if st.button("Carregar Dados"):
+        if st.button("📥 Carregar Dados"):
             if rec_selecionada != "-- Selecione para editar --":
                 rec_dados = dict_receitas[rec_selecionada]
                 st.session_state.rec_nome_edicao = rec_dados['name']
@@ -151,13 +148,20 @@ with aba_criar:
 
     st.markdown("### 🛒 Ingredientes e Sub-receitas")
     
-    with st.popover("➕ Adicionar uma Sub-Receita"):
+    # --- NOVIDADE VISUAL: CONTROLO CLARO DE SUB-RECEITAS ---
+    with st.popover("➕ Adicionar uma Sub-Receita (Mistura de Receitas)"):
         if receitas_salvas:
             sel_sub = st.selectbox("Escolher Receita Base", list(dict_receitas.keys()))
-            qtd_sub = st.number_input("Quantas PORÇÕES vai usar?", min_value=0.01, value=1.0)
+            rec_sub_dados = dict_receitas[sel_sub]
+            rendimento_sub = max(rec_sub_dados.get('rendimento', 1.0), 0.01)
+            custo_total_sub = rec_sub_dados.get('total_cost', 0)
+            custo_por_porcao_sub = custo_total_sub / rendimento_sub
+            
+            st.info(f"ℹ️ A receita original de **{sel_sub}** rende **{rendimento_sub:.1f} porções**.\n\nO custo base dela é de **R$ {custo_por_porcao_sub:.2f} por porção**.")
+            
+            qtd_sub = st.number_input(f"Vai usar quantas PORÇÕES de {sel_sub} nesta nova receita?", min_value=0.01, value=1.0)
+            
             if st.button("Inserir Sub-Receita na Tabela"):
-                rec_sub_dados = dict_receitas[sel_sub]
-                rendimento_sub = rec_sub_dados.get('rendimento', 1.0)
                 nova_linha = pd.DataFrame([{
                     "Tipo": "Sub-receita", "Nome": rec_sub_dados['name'],
                     "Preco_Pacote": rec_sub_dados['total_cost'], "Tam_Pacote": rendimento_sub, 
@@ -166,7 +170,9 @@ with aba_criar:
                 st.session_state.df_ingredientes = pd.concat([st.session_state.df_ingredientes, nova_linha], ignore_index=True)
                 st.rerun()
         else:
-            st.warning("Sem receitas guardadas.")
+            st.warning("É necessário guardar pelo menos uma receita primeiro.")
+    
+    st.caption("Adicione linhas na tabela. Nota: O 'Preço do Pacote' aceita o valor **0** (para patrocínios ou doações).")
     
     edited_df = st.data_editor(
         st.session_state.df_ingredientes, num_rows="dynamic",
@@ -176,7 +182,7 @@ with aba_criar:
             "Preco_Pacote": st.column_config.NumberColumn("Preço Pacote (R$)", min_value=0.0, format="%.2f"), 
             "Tam_Pacote": st.column_config.NumberColumn("Tamanho Pacote", min_value=0.0001),
             "Medida": st.column_config.SelectboxColumn("Medida", options=["g", "ml", "unid", "kg", "L", "receita", "porções"]),
-            "Qtd_Usada": st.column_config.NumberColumn("Qtd Usada na Receita", min_value=0.0001)
+            "Qtd_Usada": st.column_config.NumberColumn("Qtd Usada", min_value=0.0001)
         }, use_container_width=True, hide_index=True
     )
 
@@ -195,16 +201,22 @@ with aba_criar:
             })
 
     if custo_total_estimado >= 0:
-        st.info(f"💰 Custo Fornada: **R$ {custo_total_estimado:.2f}** | 🍽️ 1 Porção: **R$ {(custo_total_estimado / rendimento_receita if rendimento_receita > 0 else 0):.2f}**")
+        custo_por_porcao = custo_total_estimado / rendimento_receita if rendimento_receita > 0 else 0
+        st.success(f"💰 Custo Fornada Inteira: **R$ {custo_total_estimado:.2f}** | 🍽️ Custo Exato de 1 Porção: **R$ {custo_por_porcao:.2f}**")
 
     c_save, c_clear = st.columns([1, 4])
     if c_save.button("💾 Guardar Receita", type="primary"):
         if nome_receita and ingredientes_processados:
             salvar_receita(nome_receita, autor_receita, ingredientes_processados, rendimento_receita)
-            st.success("Guardada com sucesso!"); st.rerun()
+            st.success("Receita guardada com sucesso na base de dados!")
+            st.rerun()
+        else:
+            st.error("Preencha o nome da receita e adicione pelo menos um ingrediente válido.")
             
     if c_clear.button("🗑️ Limpar Formulário"):
         st.session_state.df_ingredientes = pd.DataFrame(columns=["Tipo", "Nome", "Preco_Pacote", "Tam_Pacote", "Medida", "Qtd_Usada"])
+        st.session_state.rec_nome_edicao = ""
+        st.session_state.rec_rendimento_edicao = 1.0
         st.rerun()
 
 # ==================================================
@@ -216,19 +228,27 @@ with aba_listar:
         for rec in receitas_salvas:
             rend_salvo = rec.get('rendimento', 1.0)
             custo_por_porcao = rec['total_cost'] / rend_salvo if rend_salvo > 0 else 0
+            
             with st.expander(f"🍽️ {rec['name']} - Rende {rend_salvo} porções | Porção: R$ {custo_por_porcao:.2f} | Total: R$ {rec['total_cost']:.2f}"):
+                st.caption(f"Autor: {rec.get('author', 'Desconhecido')}")
                 df_ing = pd.DataFrame(rec['ingredients'])
-                if 'tipo' not in df_ing.columns: df_ing['tipo'] = 'Ingrediente'
+                
+                if 'tipo' not in df_ing.columns: 
+                    df_ing['tipo'] = 'Ingrediente'
+                    
                 st.dataframe(df_ing[["tipo", "nome", "qtd_usada", "unidade", "custo_final"]], use_container_width=True, hide_index=True)
-                if st.button("🗑️ Apagar esta receita", key=f"del_{rec['id']}"):
-                    apagar_receita(rec['id']); st.rerun()
-    else: st.info("Ainda não tem receitas guardadas.")
+                
+                if st.button("🗑️ Apagar esta receita permanentemente", key=f"del_{rec['id']}"):
+                    apagar_receita(rec['id'])
+                    st.rerun()
+    else: 
+        st.info("O seu banco de dados está vazio. Crie uma receita na aba anterior.")
 
 # ==================================================
 # ABA 3: PLANEADOR DE PRODUÇÃO E VENDAS
 # ==================================================
 with aba_calculadora:
-    st.subheader("🛒 Carrinho de Produção")
+    st.subheader("🛒 Carrinho de Produção Mestre")
     
     with st.expander("📂 Carregar / Gerir Planeamentos de Produção Salvos"):
         planos_salvos = pegar_planeamentos()
@@ -245,13 +265,13 @@ with aba_calculadora:
                 if p_sel != "-- Selecione --":
                     plano_escolhido = next(p for p in planos_salvos if p['nome'] == p_sel)
                     apagar_planeamento(plano_escolhido['id'])
-                    st.success("Apagado!"); st.rerun()
+                    st.success("Planeamento apagado!"); st.rerun()
         else:
-            st.info("Nenhum planeamento salvo ainda. Guarde um no fim da página!")
+            st.info("Nenhum planeamento salvo ainda. Guarde um no final desta página.")
 
     col_markup, col_vazia2 = st.columns([1, 2])
     with col_markup:
-        markup_padrao = st.number_input("📈 Markup Inicial Sugerido", min_value=1.0, value=3.0, step=0.1)
+        markup_padrao = st.number_input("📈 Markup Inicial Sugerido", min_value=1.0, value=3.0, step=0.1, help="Multiplicador base de lucro.")
     
     st.divider()
 
@@ -260,7 +280,7 @@ with aba_calculadora:
             c_sel, c_qtd, c_btn = st.columns([2, 1, 1])
             r_escolhida = c_sel.selectbox("Escolha a Receita", list(dict_receitas.keys()))
             dados_rec = dict_receitas.get(r_escolhida)
-            multiplicador = c_qtd.number_input("Fornadas (Múltiplos da Receita Inteira)", min_value=1.0, value=1.0, step=1.0)
+            multiplicador = c_qtd.number_input("Fornadas (Lotes inteiros)", min_value=1.0, value=1.0, step=1.0)
             
             if c_btn.button("➕ Adicionar à Fila"):
                 st.session_state.fila_producao.append({
@@ -269,45 +289,39 @@ with aba_calculadora:
                 st.rerun()
 
         if st.session_state.fila_producao:
-            # --- MOTOR DE NORMALIZAÇÃO DE MEDIDAS (RESOLVE O BUG DO KG VS G) ---
             def extrair_ingredientes_base(receita, mult_atual):
                 ingredientes_finais = []
                 for ing in receita['ingredients']:
                     if ing.get('tipo', 'Ingrediente') == 'Sub-receita':
                         sub_rec_dados = dict_receitas.get(ing['nome'])
                         if sub_rec_dados:
-                            mult_sub = (ing['qtd_usada'] / ing['tam_pacote']) * mult_atual
+                            tam_pacote = max(ing['tam_pacote'], 0.0001)
+                            # EXATAMENTE AQUI OCORRE A MÁGICA DE EXTRAIR APENAS A PORÇÃO USADA:
+                            mult_sub = (ing['qtd_usada'] / tam_pacote) * mult_atual
                             ingredientes_finais.extend(extrair_ingredientes_base(sub_rec_dados, mult_sub))
                     else:
                         ing_copy = ing.copy()
-                        
-                        # --- INÍCIO DA NORMALIZAÇÃO ---
                         medida = ing_copy.get('unidade', 'unid')
                         qtd = ing_copy.get('qtd_usada', 0)
-                        tam = ing_copy.get('tam_pacote', 1)
+                        tam = max(ing_copy.get('tam_pacote', 1), 0.0001)
                         
                         if medida == 'kg':
-                            qtd = qtd * 1000
-                            tam = tam * 1000
-                            medida = 'g'
+                            qtd *= 1000; tam *= 1000; medida = 'g'
                         elif medida == 'L':
-                            qtd = qtd * 1000
-                            tam = tam * 1000
-                            medida = 'ml'
+                            qtd *= 1000; tam *= 1000; medida = 'ml'
                             
                         ing_copy['qtd_usada'] = qtd * mult_atual
                         ing_copy['tam_pacote'] = tam
                         ing_copy['unidade'] = medida
-                        # Custo recalcullado para garantir a precisão
                         ing_copy['custo_final'] = (ing_copy['preco_compra'] / tam) * ing_copy['qtd_usada']
-                        # --- FIM DA NORMALIZAÇÃO ---
-                        
                         ingredientes_finais.append(ing_copy)
                 return ingredientes_finais
 
-            st.markdown("### 🔍 Precificação e Produção (Editável)")
+            st.markdown("### 🔍 Tabela de Produção e Precificação")
+            st.caption("Dê dois cliques na coluna **Fornadas** para alterar quantidades ou na coluna **Preço Venda (1 Porção)** para ajustar o lucro.")
             
             tabela_por_receita = []
+            
             for index, item in enumerate(st.session_state.fila_producao):
                 ing_puros_item = extrair_ingredientes_base(item['receita'], item['qtd'])
                 custo_total_fornada_produzida = sum(i['custo_final'] for i in ing_puros_item)
@@ -353,7 +367,6 @@ with aba_calculadora:
             for i, row in edited_df_analise.iterrows():
                 novo_preco = row['✏️ Preço Venda (1 Porção)']
                 nova_qtd = row['✏️ Fornadas']
-                
                 if st.session_state.fila_producao[i].get('preco_venda_porcao') != novo_preco or st.session_state.fila_producao[i]['qtd'] != nova_qtd:
                     st.session_state.fila_producao[i]['preco_venda_porcao'] = novo_preco
                     st.session_state.fila_producao[i]['qtd'] = nova_qtd
@@ -371,7 +384,7 @@ with aba_calculadora:
 
             st.divider()
 
-            # --- CONSOLIDAÇÃO DA LISTA DE COMPRAS ---
+            # --- CONSOLIDAÇÃO DA LISTA DE COMPRAS GERAL ---
             ingredientes_consolidados = {}
             custo_proporcional_total = 0
             
@@ -380,7 +393,11 @@ with aba_calculadora:
                 for ing in lista_ingredientes_puros:
                     nome = ing['nome']
                     if nome not in ingredientes_consolidados:
-                        ingredientes_consolidados[nome] = {"qtd_total": 0, "tam_pacote": ing['tam_pacote'], "preco_compra": ing['preco_compra'], "unidade": ing['unidade'], "custo_prop_acumulado": 0}
+                        ingredientes_consolidados[nome] = {
+                            "qtd_total": 0, "tam_pacote": ing['tam_pacote'], 
+                            "preco_compra": ing['preco_compra'], "unidade": ing['unidade'], 
+                            "custo_prop_acumulado": 0
+                        }
                     ingredientes_consolidados[nome]["qtd_total"] += ing['qtd_usada']
                     ingredientes_consolidados[nome]["custo_prop_acumulado"] += ing['custo_final']
                     custo_proporcional_total += ing['custo_final']
@@ -389,28 +406,26 @@ with aba_calculadora:
             lista_compras = []
             
             for nome, dados in ingredientes_consolidados.items():
-                # O pacote e a quantidade total já estão na mesma unidade base (ex: tudo em gramas) graças à normalização
-                pacotes_necessarios = math.ceil(dados["qtd_total"] / dados["tam_pacote"])
+                pacotes_necessarios = math.ceil(dados["qtd_total"] / dados["tam_pacote"]) if dados["tam_pacote"] > 0 else 0
                 custo_mercado_ing = pacotes_necessarios * dados["preco_compra"]
                 desembolso_mercado_total += custo_mercado_ing
                 
-                # Para exibição, mostra a unidade que ficou (g ou ml)
                 lista_compras.append({
                     "Ingrediente": nome,
                     "Necessidade Real": f"{dados['qtd_total']:.1f} {dados['unidade']}",
-                    "Comprar (Pacotes Fechados)": f"{pacotes_necessarios}x ({dados['tam_pacote']}{dados['unidade']})",
+                    "Comprar (Pacotes)": f"{pacotes_necessarios}x ({dados['tam_pacote']}{dados['unidade']})",
                     "Desembolso Caixa": f"R$ {custo_mercado_ing:.2f}"
                 })
 
             st.markdown("### 📊 Orçamento Total Consolidado")
             col_res1, col_res2, col_res3 = st.columns(3)
             with col_res1: cartao_financeiro("Custo Proporcional", custo_proporcional_total, "#FF9800", "⚖️", "Custo das gramas utilizadas.")
-            with col_res2: cartao_financeiro("Desembolso de Caixa", desembolso_mercado_total, "#F44336", "🛒", "Valor total no mercado.")
+            with col_res2: cartao_financeiro("Desembolso de Caixa", desembolso_mercado_total, "#F44336", "🛒", "Valor em pacotes fechados.")
             with col_res3:
                 faturamento_projetado = sum((item['preco_venda_porcao'] * (item['qtd'] * item['receita'].get('rendimento', 1.0))) for item in st.session_state.fila_producao)
                 cartao_financeiro("Faturamento Projetado", faturamento_projetado, "#4CAF50", "🤑", "Soma de todas as vendas.")
             
-            st.markdown("### 📝 Lista de Compras Pura (Mercado)")
+            st.markdown("### 📝 Lista de Compras Otimizada (Mercado)")
             df_compras = pd.DataFrame(lista_compras)
             st.dataframe(df_compras, use_container_width=True, hide_index=True)
             
@@ -421,14 +436,14 @@ with aba_calculadora:
             
             st.markdown("### 💾 Guardar este Planeamento")
             c_nome_plano, c_salvar_plano = st.columns([3, 1])
-            nome_novo_plano = c_nome_plano.text_input("Nome (ex: Encomenda Sexta-feira)", value=st.session_state.nome_plano_atual)
-            if c_salvar_plano.button("Guardar Planeamento", use_container_width=True):
+            nome_novo_plano = c_nome_plano.text_input("Nome (ex: Encomenda de Sábado)", value=st.session_state.nome_plano_atual)
+            if c_salvar_plano.button("Salvar Planeamento", use_container_width=True):
                 if nome_novo_plano:
                     salvar_planeamento(nome_novo_plano, st.session_state.fila_producao)
                     st.session_state.nome_plano_atual = nome_novo_plano
-                    st.success("Planeamento guardado no banco de dados!")
+                    st.success("Planeamento guardado no banco de dados com sucesso!")
                 else:
-                    st.error("Dê um nome ao planeamento antes de guardar.")
+                    st.error("Dê um nome ao planeamento antes de o guardar.")
 
     else:
-        st.warning("Crie e guarde uma receita na primeira aba para utilizar o planeador.")
+        st.warning("Para começar a planear, crie e guarde pelo menos uma receita na primeira aba.")
